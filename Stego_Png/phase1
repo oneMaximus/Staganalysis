@@ -156,59 +156,53 @@ def extract(steg: Path) -> bytes:
 # ---------------------------
 def interactive_pipeline():
     """
-    Pipeline logic with documentation comments:
-
-    1) Look into ./pngfolder and grab the first .png (sorted by name).
-    2) Prompt user to input a string to embed.
-    3) Basic LSB matching method to hide header+message.
-    4) Output the stego image as [original_name]__steg.png in the same folder.
-       Also preview Original vs Stego side-by-side with matplotlib.
-    5) Close the program.
+    Phase 1 pipeline:
+      1) Use first PNG in ./pngfolder as the cover
+      2) Ask for a message
+      3) Embed with 1 LSB / channel
+      4) Save stego as StegPng/<cover_stem>__steg.png (auto-creates folder)
+      5) Show Original vs Stego preview
+      6) Print absolute path of saved file
     """
-    folder = Path(__file__).resolve().parent / "pngfolder"  # assume steg1.py is inside pngfolder
-    pngs = sorted(p for p in folder.glob("*.png") if p.is_file())
+    base = Path(__file__).resolve().parent
+    cover_dir = base / "pngfolder"
+    out_dir = base / "StegPng"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pngs = sorted(p for p in cover_dir.glob("*.png") if p.is_file())
     if not pngs:
-        print("No PNG files found next to steg1.py. Put a cover image in this folder and try again.")
+        print("No PNG files found in ./pngfolder. Drop a cover image there and run again.")
         return
 
     cover = pngs[0]
-    print(f"[1] Using first PNG found: {cover.name}")
+    print(f"[1] Using cover PNG: {cover.name}")
 
     msg = input("[2] Enter the message to embed: ")
     payload = msg.encode()
 
-    # Capacity check with friendly message
+    # Capacity check (incl. header)
     cap = capacity_bytes(Image.open(cover))
     if len(payload) + HEADER_LEN > cap:
-        print(f"Message too long for this image.\nCapacity (recommended): {cap - HEADER_LEN} bytes")
+        print(f"Message too long for this image.\nCapacity available: {cap - HEADER_LEN} bytes")
         return
 
-    out_path = default_stego_name(cover)
+    out_path = out_dir / f"{cover.stem}__stegtext.png"
     print("[3] Embedding with basic LSB (1 bit/channel)...")
     embed(cover, out_path, payload)
 
     print(f"[4] Saved stego image: {out_path.name}")
-    print("Opening a preview window (Original vs Stego). Close it to finish.")
+    print("[5] Opening preview (Original vs Stego). Close the window to continue.")
 
-    # Preview: Original vs Stego (no seaborn; single figure with 2 axes)
+    # Preview side-by-side
     orig_img = Image.open(cover).convert("RGB")
     steg_img = Image.open(out_path).convert("RGB")
-
     fig = plt.figure(figsize=(8, 4))
-    ax1 = fig.add_subplot(1, 2, 1)
-    ax1.imshow(orig_img)
-    ax1.set_title("Original")
-    ax1.axis("off")
+    ax1 = fig.add_subplot(1, 2, 1); ax1.imshow(orig_img); ax1.set_title("Original"); ax1.axis("off")
+    ax2 = fig.add_subplot(1, 2, 2); ax2.imshow(steg_img); ax2.set_title("Stego");    ax2.axis("off")
+    plt.tight_layout(); plt.show()
 
-    ax2 = fig.add_subplot(1, 2, 2)
-    ax2.imshow(steg_img)
-    ax2.set_title("Stego")
-    ax2.axis("off")
+    print(f"[6] Done. Stego saved at:\n    {out_path.resolve()}")
 
-    plt.tight_layout()
-    plt.show()
-
-    print("[5] Done. Program will now exit.")
 
 
 # ---------------------------
