@@ -165,7 +165,7 @@ def interactive_pipeline():
        Also preview Original vs Stego side-by-side with matplotlib.
     5) Close the program.
     """
-    folder = Path(__file__).resolve().parent  # assume steg1.py is inside pngfolder
+    folder = Path(__file__).resolve().parent / "pngfolder"  # assume steg1.py is inside pngfolder
     pngs = sorted(p for p in folder.glob("*.png") if p.is_file())
     if not pngs:
         print("No PNG files found next to steg1.py. Put a cover image in this folder and try again.")
@@ -243,7 +243,7 @@ def _cmd_interactive(_a: argparse.Namespace):
 
 def main():
     p = argparse.ArgumentParser(description="steg1 — PNG LSB steganography (Phase 1)")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
 
     pe = sub.add_parser("embed", help="Embed message/file into a PNG")
     pe.add_argument("cover", help="Cover PNG path")
@@ -264,8 +264,15 @@ def main():
     pii = sub.add_parser("pipeline", help="Run interactive pipeline (grab first PNG in folder, prompt, preview)")
     pii.set_defaults(func=_cmd_interactive)
 
+    # Parse args
     args = p.parse_args()
-    args.func(args)
+
+    if args.cmd:
+        args.func(args)
+    else:
+        # Default: run interactive pipeline
+        interactive_pipeline()
+
 
 if __name__ == "__main__":
     main()
