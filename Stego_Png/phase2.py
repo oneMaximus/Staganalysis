@@ -22,43 +22,65 @@ def build_header(payload: bytes, mime: int) -> bytes:
     checksum = crc32(payload).to_bytes(4, "big")
     return MAGIC + bytes([VERSION, FLAG_NONE, mime]) + length + checksum
 
-def _img_to_rgb(img: Image.Image) -> np.ndarray:
-    if img.mode != "RGB":
-        img = img.convert("RGB")
+def _to_mode_array(img: Image.Image, use_alpha: bool) -> np.ndarray:
+    mode = "RGBA" if use_alpha else "RGB"
+    if img.mode != mode:
+        img = img.convert(mode)
     return np.array(img, dtype=np.uint8)
 
-def capacity_bytes(img: Image.Image) -> int:
-    arr = _img_to_rgb(img)
-    h, w, _ = arr.shape
-    return (h * w * 3) // 8  # 1 LSB per RGB channel
+def capacity_bytes(img: Image.Image, bpc: int, use_alpha: bool) -> int:
+    """Capacity with bpc LSBs/channel minus header."""
+    arr = _to_mode_array(img, use_alpha)
+    h, w, c = arr.shape
+    return (h * w * c * bpc) // 8 - HEADER_LEN
 
 def _bits_from_bytes(data: bytes):
     for byte in data:
         for i in range(7, -1, -1):
             yield (byte >> i) & 1
 
-# ---------- core embed ----------
-def embed_image(cover: Path, payload: bytes, output: Path):
+# ---------- core embed with configurable bpc & alpha ----------
+def embed_image(cover: Path, payload: bytes, output: Path, bpc: int, use_alpha: bool):
+    """
+    Embed header+payload using bpc LSBs per channel.
+    """
     img = Image.open(cover)
-    arr = _img_to_rgb(img)
-    H, W, _ = arr.shape
-    flat = arr.reshape(-1, 3).copy()
+    arr = _to_mode_array(img, use_alpha)
+    H, W, C = arr.shape
+    flat = arr.reshape(-1, C).copy()
 
     header = build_header(payload, MIME_IMAGE)
     total = header + payload
 
-    cap = capacity_bytes(img)
+    cap = (H * W * C * bpc) // 8
     if len(total) > cap:
-        raise ValueError(f"Payload too large. Capacity ≈ {cap-HEADER_LEN} bytes; got {len(payload)}")
+        raise ValueError(f"Payload too large. Capacity ≈ {cap - HEADER_LEN} bytes; got {len(payload)}")
 
-    bits = _bits_from_bytes(total)
-    for i in range(len(total) * 8):
-        pidx, cidx = divmod(i, 3)
-        flat[pidx, cidx] = (flat[pidx, cidx] & 0xFE) | next(bits)
+    bit_iter = _bits_from_bytes(total)
+    try:
+        for px in range(flat.shape[0]):
+            for ch in range(C):
+                v = int(flat[px, ch])  # do bit math on Python int
+                for k in range(bpc):
+                    bit = next(bit_iter)
+                    mask = 0xFF ^ (1 << k)          # clear k-th LSB safely
+                    v = (v & mask) | ((bit & 1) << k)
+                flat[px, ch] = np.uint8(v)          # back to uint8
+    except StopIteration:
+        stego = flat.reshape(H, W, C)
+        mode = "RGBA" if use_alpha else "RGB"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(stego, mode=mode).save(output)
+        return
 
-    stego = flat.reshape(H, W, 3)
-    output.parent.mkdir(parents=True, exist_ok=True)   # ensure StegPng/ exists
-    Image.fromarray(stego, mode="RGB").save(output)
+    # Should never reach here because we pre-check capacity
+    raise RuntimeError("Unexpected: ran out of image space after capacity check passed.")
+
+# Try multiple capacity settings automatically
+SETTINGS_TRY = [
+    (1, False), (2, False), (3, False),  # RGB with 1..3 LSBs
+    (1, True),  (2, True),  (3, True),   # RGBA with 1..3 LSBs
+]
 
 # ---------- pipeline ----------
 def main():
@@ -83,25 +105,37 @@ def main():
 
     out_path = steg_out / f"{cover.stem}__stegPhoto.png"
 
-    print(f"[1] Using cover image: {cover.name}")
-    print(f"[2] Embedding payload image: {payload_img.name}")
-    print("[3] Embedding with LSB (1 bit/channel)...")
+    print(f"[1] Using cover image:   {cover.name}")
+    print(f"[2] Embedding payload:   {payload_img.name}  ({len(payload_bytes):,} bytes)")
 
-    embed_image(cover, payload_bytes, out_path)
+    # Try combos until one fits
+    for bpc, use_alpha in SETTINGS_TRY:
+        cap = capacity_bytes(Image.open(cover), bpc=bpc, use_alpha=use_alpha)
+        print(f"    - Trying bpc={bpc}, {'RGBA' if use_alpha else 'RGB'} → capacity ≈ {cap:,} bytes")
+        if cap >= len(payload_bytes):
+            print("[3] Embedding…")
+            embed_image(cover, payload_bytes, out_path, bpc=bpc, use_alpha=use_alpha)
+            print(f"[4] Saved stego image: {out_path.name}")
+            print("[5] Preview window: Original vs Stego (close to continue)")
 
-    print(f"[4] Saved stego image: {out_path.name}")
-    print(f"[5] Preview window: Original vs Stego (close to continue)")
+            # Side-by-side preview
+            orig_img = Image.open(cover).convert("RGB")
+            steg_img = Image.open(out_path).convert("RGB")
+            fig = plt.figure(figsize=(8, 4))
+            ax1 = fig.add_subplot(1, 2, 1); ax1.imshow(orig_img); ax1.set_title("Original"); ax1.axis("off")
+            ax2 = fig.add_subplot(1, 2, 2); ax2.imshow(steg_img); ax2.set_title("Stego");    ax2.axis("off")
+            plt.tight_layout(); plt.show()
 
-    # Side-by-side preview
-    orig_img = Image.open(cover).convert("RGB")
-    steg_img = Image.open(out_path).convert("RGB")
+            print(f"[6] Done. Stego saved at:\n    {out_path.resolve()}")
+            return
 
-    fig = plt.figure(figsize=(8, 4))
-    ax1 = fig.add_subplot(1, 2, 1); ax1.imshow(orig_img); ax1.set_title("Original"); ax1.axis("off")
-    ax2 = fig.add_subplot(1, 2, 2); ax2.imshow(steg_img); ax2.set_title("Stego");    ax2.axis("off")
-    plt.tight_layout(); plt.show()
-
-    print(f"[6] Done. Stego saved at:\n    {out_path.resolve()}")
+    # If we’re here, none of the combos could fit the payload
+    # Compute best capacity to report a friendly shortfall
+    best_cap = max(capacity_bytes(Image.open(cover), bpc=b, use_alpha=a) for b, a in SETTINGS_TRY)
+    short = len(payload_bytes) - best_cap
+    print(f"❌ Payload too large for this cover even at bpc=3 RGBA.")
+    print(f"   Best capacity: {best_cap:,} bytes; payload: {len(payload_bytes):,} bytes; short by {short:,} bytes.")
+    print("   Fixes: use a larger cover image, pick a smaller payload image, or move to Phase 3 multi-image packing.")
 
 if __name__ == "__main__":
     main()
