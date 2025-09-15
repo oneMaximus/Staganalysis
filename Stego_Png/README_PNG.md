@@ -65,4 +65,4 @@ Requirements:
 Install dependencies:
 
 ```bash
-pip install pillow click numpy
+pip install Pillow click numpy matplotlib
