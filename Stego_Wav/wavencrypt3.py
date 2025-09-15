@@ -34,9 +34,9 @@ from zlib import crc32
 # Path setup (outside wav_encrypt for payload/output)
 # ---------------------------
 BASE = Path(__file__).resolve().parent               # .../wav_encrypt
-DIR_WAV = BASE / "wav"                               # .../wav_encrypt/wav
-DIR_VIDEO = BASE.parent / "video_embed"              # .../video_embed
-DIR_OUT = BASE.parent / "StegPng"                    # .../StegPng
+DIR_WAV = BASE / "cover"                               # .../wav_encrypt/wav
+DIR_VIDEO = BASE / "video_payload"              # .../video_embed
+DIR_OUT = BASE / "stego"                    # .../StegPng
 DIR_WAV.mkdir(parents=True, exist_ok=True)
 DIR_VIDEO.mkdir(parents=True, exist_ok=True)
 DIR_OUT.mkdir(parents=True, exist_ok=True)
@@ -291,7 +291,7 @@ def interactive_pipeline():
     if not cover.exists():
         cover = _first_in(DIR_WAV, ("*.wav","*.WAV"))
         if cover is None:
-            print("❌ No WAV found in ./wav_encrypt/wav. Place cover.wav or any 16-bit PCM WAV there.")
+            print("❌ No WAV found in ./cover. Place cover.wav or any 16-bit PCM WAV there.")
             return
 
     video = _first_in(DIR_VIDEO, ("*.mp4","*.mov","*.avi","*.mkv","*.MP4","*.MOV","*.AVI","*.MKV"))
@@ -323,7 +323,7 @@ def interactive_pipeline():
         print("   Fix: increase LSBs, use a longer WAV, or a smaller/shorter video.")
         return
 
-    out_wav = DIR_WAV / "stego.wav"
+    out_wav = DIR_OUT / "stegoVid.wav"
     print("[5] Embedding video into WAV…")
     encode(str(cover), str(out_wav), key, n_lsb, str(video))
     print(f"[6] ✅ Encoded → {out_wav}")
@@ -362,8 +362,8 @@ def _build_parser():
     pe.add_argument("--video", required=True, help="Video file to embed (MP4/MOV/AVI/MKV)")
 
     pd = sub.add_parser("decode", help="Decode video from WAV")
-    pd.add_argument("--in", dest="in_wav", default=str(DIR_WAV / "stego.wav"),
-                    help="Stego WAV (default: wav/stego.wav under wav_encrypt)")
+    pd.add_argument("--in", dest="in_wav", default=str(DIR_WAV / "stegoVid.wav"),
+                    help="Stego WAV (default: stego/stegoVid.wav under wav_encrypt)")
     pd.add_argument("--key", type=int, required=True, help="Integer key used during encode")
     pd.add_argument("--out", dest="out_file", default=str(DIR_OUT / "recovered_video.bin"),
                     help="Output path for recovered video (default: ../StegPng/recovered_video.bin)")

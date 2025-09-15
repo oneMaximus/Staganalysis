@@ -11,7 +11,7 @@ Features
 
 Typical folder layout
 .
-├── wavencrypt.py
+├── wavencrypt1.py
 └── wav/
     ├── cover.wav        # your source/cover audio (16-bit PCM)
     └── stego.wav        # will be created on encode
@@ -317,8 +317,10 @@ def interactive_pipeline():
       5) Print instructions to decode
     """
     base = Path(__file__).resolve().parent
-    wav_dir = base / "wav"
+    wav_dir = base / "cover"
+    wav_dir_stego = base / "stego"
     wav_dir.mkdir(parents=True, exist_ok=True)
+    wav_dir_stego.mkdir(parents=True, exist_ok=True)
 
     # choose cover: prefer wav/cover.wav, else first .wav in folder
     cover = wav_dir / "cover.wav"
@@ -329,7 +331,7 @@ def interactive_pipeline():
             return
         cover = candidates[0]
 
-    out_wav = wav_dir / "stego.wav"
+    out_wav = wav_dir_stego / "stego.wav"
     print(f"[1] Using cover WAV: {cover.name}")
 
     # prompts (with safe defaults)
@@ -371,7 +373,7 @@ def interactive_pipeline():
         print(f"(preview failed: {e})")
 
     print("\nTo decode later:")
-    print(f"  python wavencrypt.py decode --in {out_wav} --key {key}")
+    print(f"  python wavencrypt1.py decode --in {out_wav} --key {key}")
 
 def _build_parser():
     p = argparse.ArgumentParser(description="LSB WAV steganography (text <-> .wav) with key-based permutation")
@@ -387,8 +389,8 @@ def _build_parser():
     g.add_argument("--text-file", type=str, help="Path to text file to hide (raw bytes)")
 
     pd = sub.add_parser("decode", help="Decode text from a stego WAV")
-    pd.add_argument("--in", dest="in_wav", default="wav/stego.wav",
-                help="Input stego WAV (default: wav/stego.wav)")
+    pd.add_argument("--in", dest="in_wav", default="stego/stego.wav",
+                help="Input stego WAV (default: stego/stego.wav)")
     pd.add_argument("--key", type=int, required=True, help="Integer key used during encoding")
 
     # NEW: interactive mode like phase1

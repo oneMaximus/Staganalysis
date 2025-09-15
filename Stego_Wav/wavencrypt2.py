@@ -33,9 +33,9 @@ from zlib import crc32
 base = Path(__file__).resolve().parent
 
 # Adjusted to point outside wav_encrypt/
-dir_wav   = base / "wav"               # wav_encrypt/wav
-dir_png   = base.parent / "png_embed"  # ../png_embed
-dir_out   = base.parent / "StegPng"    # ../StegPng
+dir_wav   = base / "cover"               # wav_encrypt/wav
+dir_png   = base / "png_payload"  # ../png_payload
+dir_out   = base / "stego"    # ../stego
 
 # ---------------------------
 # Constants
@@ -294,7 +294,8 @@ def _capacity_bytes(total_samples: int, n_lsb: int) -> int:
 
 def interactive_pipeline():
     base = Path(__file__).resolve().parent
-    global dir_wav, dir_png, dir_out
+    global dir_wav, dir_png
+    dir_out   = base / "stego"               # wav_encrypt/stego
 
     dir_wav.mkdir(parents=True, exist_ok=True)
     dir_png.mkdir(parents=True, exist_ok=True)
@@ -304,12 +305,12 @@ def interactive_pipeline():
     if not cover.exists():
         cover = _first_in(dir_wav, ("*.wav","*.WAV"))
         if cover is None:
-            print("❌ No WAV found in ./wav. Place cover.wav or any 16-bit PCM WAV there.")
+            print("❌ No WAV found in ./cover. Place cover.wav or any 16-bit PCM WAV there.")
             return
 
     image = _first_in(dir_png, ("*.png","*.jpg","*.jpeg","*.gif","*.bmp","*.PNG","*.JPG","*.JPEG","*.GIF","*.BMP"))
     if image is None:
-        print("❌ No image found in ./png_embed. Place a PNG/JPG/GIF/BMP there.")
+        print("❌ No image found in ./png_payload. Place a PNG/JPG/GIF/BMP there.")
         return
 
     print(f"[1] Cover WAV : {cover.name}")
@@ -336,7 +337,7 @@ def interactive_pipeline():
         print("   Fix: increase LSBs, use a longer WAV, or a smaller image.")
         return
 
-    out_wav = dir_wav / "stego.wav"
+    out_wav = dir_out / "stegoPng.wav"
     print("[5] Embedding image into WAV…")
     encode(str(cover), str(out_wav), key, n_lsb, str(image))
     print(f"[6] ✅ Encoded → {out_wav}")
@@ -379,8 +380,8 @@ def _build_parser():
     pe.add_argument("--image", required=True, help="Image file to embed (PNG/JPG/GIF/BMP)")
 
     pd = sub.add_parser("decode", help="Decode image from WAV")
-    pd.add_argument("--in", dest="in_wav", default="wav/stego.wav",
-                    help="Stego WAV (default: wav/stego.wav)")
+    pd.add_argument("--in", dest="in_wav", default="stego/stegoPng.wav",
+                    help="Stego WAV (default: stego/stegoPng.wav)")
     pd.add_argument("--key", type=int, required=True, help="Integer key used during encode")
     pd.add_argument("--out", dest="out_file", default="Stego_Png/recovered.bin",
                     help="Output path for recovered image (default: Stego_Png/recovered.bin)")
