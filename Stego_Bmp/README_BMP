@@ -1,0 +1,12 @@
+Terminal
+
+Phase1
+python phase1_bmp.py embed bmpfolder/cover1.bmp --infile bmp_embed/secret6.txt --output StegBmp/cover6__steg.bmp
+
+python phase1_bmp.py extract StegBmp/cover6__steg.bmp --outfile recovered_secret/secret6.txt
+
+Phase 2
+python phase2_bmp.py --payload secret5.png
+
+Phase 3
+python phase3_bmp.py --video video_embed/secret.mp4 --bpc 2
