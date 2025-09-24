@@ -57,7 +57,7 @@ This project is built in **phases**, starting with text embedding and gradually 
 ## 📦 Installation
 
 Requirements:
-- Python 3.10+
+- Python 3.11+
 - [Pillow](https://pypi.org/project/Pillow/)
 - [click](https://pypi.org/project/click/)
 - [numpy](https://pypi.org/project/numpy/)
@@ -65,4 +65,6 @@ Requirements:
 Install dependencies:
 
 ```bash
-pip install pillow click numpy matplotlib
+.venv\Scripts\activate
+deactivate
+pip install -r requirements.txt
