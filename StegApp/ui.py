@@ -1,15 +1,19 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtMultimediaWidgets import QVideoWidget
 import numpy as np
 from pathlib import Path
 from image_codec import ImageCodec
 from wav_codec import WavCodec
 from PIL import Image
 from typing import Optional
+from mp4_codec import Mp4Codec
 
 
 CODECS = {
     "Image (PNG/BMP/TIFF)": ImageCodec(),
     "Audio (WAV PCM)"     : WavCodec(),
+    "Video (MP4 H.264)"   : Mp4Codec(),
 }
 
 class DropBox(QtWidgets.QGroupBox):
@@ -42,11 +46,26 @@ class ImageView(QtWidgets.QLabel):
         pix = QtGui.QPixmap.fromImage(qimg).scaled(self.width(), self.height(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
         self.setPixmap(pix)
 
+class VideoPlayer(QtWidgets.QWidget):
+    def __init__(self, title: str):
+        super().__init__()
+        layout = QtWidgets.QVBoxLayout(self)
+        self.setLayout(layout)
+        self.player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
+        self.video_widget = QVideoWidget()
+        layout.addWidget(self.video_widget)
+        self.player.setVideoOutput(self.video_widget)
+
+    def load(self, path: Path):
+        self.player.setMedia(QMediaContent(QtCore.QUrl.fromLocalFile(str(path))))
+        self.player.play()
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__(); self.setWindowTitle("Steg Lab — Image & WAV LSB")
         self.codec_name = "Image (PNG/BMP/TIFF)"; self.codec = CODECS[self.codec_name]
         self.carrier: Optional[Path] = None; self.payload: Optional[Path] = None; self.stego: Optional[Path] = None
+        self.view_video = VideoPlayer("Video Preview")
 
         self.codec_combo = QtWidgets.QComboBox(); self.codec_combo.addItems(CODECS.keys())
         self.box_carrier = DropBox("Carrier"); self.box_payload = DropBox("Payload (any file)"); self.box_stego = DropBox("Stego (for Extract)")
@@ -83,6 +102,8 @@ class MainWindow(QtWidgets.QWidget):
         imgs.addWidget(self.view_orig)
         imgs.addWidget(self.view_steg)
         imgs.addWidget(self.view_diff)
+        imgs.addWidget(self.view_video)
+        self.view_video.hide() 
         grid.addLayout(imgs, 5, 0, 1, 2)
 
         # Save row (row 6)
@@ -113,6 +134,14 @@ class MainWindow(QtWidgets.QWidget):
                 self.view_orig.set_image_from_array(np.array(img))
             except Exception as e:
                 self.view_orig.setText(f"No preview:\n{e}")
+        elif isinstance(self.codec, Mp4Codec):
+            try:
+                self.view_orig.hide()
+                self.view_video.show()
+                self.view_video.load(p)
+            except Exception as e:
+                self.status.setText(f"No video preview: {e}")
+
         else:
             self.view_orig.setText(p.name)
 
@@ -123,6 +152,13 @@ class MainWindow(QtWidgets.QWidget):
             try:
                 self.view_steg.set_image_from_array(np.array(Image.open(p).convert("RGB")))
             except Exception: self.view_steg.setText(p.name)
+        elif isinstance(self.codec, Mp4Codec):
+            try:
+                self.view_steg.setText("Preview not implemented yet")
+                # Or: self.view_video.load(p) if you want playback for stego
+            except Exception as e:
+                self.status.setText(f"No video preview: {e}")
+
         else:
             self.view_steg.setText(p.name)
 
