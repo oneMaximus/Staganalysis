@@ -1,4 +1,3 @@
-# (Only the changed / added parts are highlighted with comments; rest is same as previous fixed version.)
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
@@ -9,7 +8,8 @@ from image_codec import ImageCodec
 from wav_codec import WavCodec
 from PIL import Image
 from typing import Optional
-from mp4_codec import Mp4Codec
+# UPDATED import to include region helpers
+from mp4_codec import Mp4Codec, preview_region, interactive_select_region
 from analysis_widget import AnalysisWidget
 
 CODECS = {
@@ -32,25 +32,19 @@ EXT_TO_CODEC = {
 }
 
 class PayloadWidget(QtWidgets.QGroupBox):
-    """Payload source: either a dropped file or typed text."""
-    changed = QtCore.pyqtSignal()  # emit whenever the payload content changes
-
+    changed = QtCore.pyqtSignal()
     def __init__(self, title="Payload"):
         super().__init__(title)
-
-        # Tabs: File | Text
         self.tabs = QtWidgets.QTabWidget()
         self.file_tab = QtWidgets.QWidget()
         self.text_tab = QtWidgets.QWidget()
         self.tabs.addTab(self.file_tab, "File")
         self.tabs.addTab(self.text_tab, "Text")
 
-        # --- File tab: reuse your DropBox ---
         self.drop = DropBox("Drop a file here")
         lay_file = QtWidgets.QVBoxLayout(self.file_tab)
         lay_file.addWidget(self.drop)
 
-        # --- Text tab: simple editor + encoding picker ---
         self.text_edit = QtWidgets.QPlainTextEdit()
         self.text_edit.setPlaceholderText("Type payload text here…")
         self.text_edit.setMinimumHeight(120)
@@ -66,20 +60,16 @@ class PayloadWidget(QtWidgets.QGroupBox):
         lay_text.addLayout(enc_row)
         lay_text.addWidget(self.text_edit)
 
-        # group layout
         outer = QtWidgets.QVBoxLayout(self)
         outer.addWidget(self.tabs)
 
-        # state
         self._file_path: Optional[Path] = None
 
-        # signals
         self.drop.fileDropped.connect(self._on_file)
         self.text_edit.textChanged.connect(self.changed)
         self.encoding.currentIndexChanged.connect(self.changed)
         self.tabs.currentChanged.connect(lambda _: self.changed.emit())
 
-    # ---- API the main window will call ----
     def has_payload(self) -> bool:
         return (self.tabs.currentIndex() == 0 and self._file_path is not None) or \
                (self.tabs.currentIndex() == 1 and len(self.text_edit.toPlainText()) > 0)
@@ -95,11 +85,9 @@ class PayloadWidget(QtWidgets.QGroupBox):
             if not self._file_path:
                 return b""
             return Path(self._file_path).read_bytes()
-        # text mode
         enc = self.encoding.currentText()
         return self.text_edit.toPlainText().encode(enc, errors="replace")
 
-    # ---- internals ----
     def _on_file(self, p: Path):
         self._file_path = p
         self.changed.emit()
@@ -125,6 +113,7 @@ class DropBox(QtWidgets.QGroupBox):
         self.label.setText(p.name)
         self.fileDropped.emit(p)
 
+
 class ImageView(QtWidgets.QLabel):
     def __init__(self, title: str):
         super().__init__()
@@ -148,12 +137,13 @@ class ImageView(QtWidgets.QLabel):
                 QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
         self.setPixmap(pix)
 
+
 class FixedVideoWidget(QVideoWidget):
     def sizeHint(self):
         return QtCore.QSize(480,270)
 
+
 class VideoPlayer(QtWidgets.QWidget):
-    # (unchanged from prior fixed version)
     def __init__(self, title: str):
         super().__init__()
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
@@ -181,24 +171,30 @@ class VideoPlayer(QtWidgets.QWidget):
         else:
             self.player.error.connect(self._on_qt_error)
         self.player.mediaStatusChanged.connect(self._on_media_status)
+
     def load(self, path: Path):
         self.stop(); self._path=Path(path)
         self.video_widget.show(); self.cv_label.hide()
         self.player.setMedia(QMediaContent(QtCore.QUrl.fromLocalFile(str(path))))
         self.player.play()
+
     def _on_media_status(self, status):
         if status == QMediaPlayer.InvalidMedia and self._path:
             self._switch_to_cv()
+
     def _on_qt_error(self,*_):
         self._switch_to_cv()
+
     def _switch_to_cv(self):
         self.player.stop(); self.video_widget.hide(); self._start_cv_fallback(self._path)
+
     def _start_cv_fallback(self, path: Path):
         self._cap = cv2.VideoCapture(str(path))
         if not self._cap.isOpened():
             self.cv_label.setText("Could not open video (fallback)."); self.cv_label.show(); return
         fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
         self._timer.start(int(max(15,1000.0/fps))); self.cv_label.show()
+
     def _next_frame(self):
         if not self._cap: return
         ok, frame = self._cap.read()
@@ -209,6 +205,7 @@ class VideoPlayer(QtWidgets.QWidget):
         pix = QtGui.QPixmap.fromImage(qimg).scaled(self.cv_label.width(), self.cv_label.height(),
                 QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
         self.cv_label.setPixmap(pix)
+
     def stop(self):
         try: self.player.stop()
         except: pass
@@ -217,8 +214,10 @@ class VideoPlayer(QtWidgets.QWidget):
             try: self._cap.release()
             except: pass
             self._cap=None
+
     def closeEvent(self,e):
         self.stop(); super().closeEvent(e)
+
 
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
@@ -261,13 +260,41 @@ class MainWindow(QtWidgets.QWidget):
         form.addRow("Carrier Type:", self.codec_combo)
         form.addRow("LSBs per channel:", self.bpc_spin)
         form.addRow("Key:", self.key_edit)
-        embed_grid.addLayout(form, 0,0,1,2)
+        embed_grid.addLayout(form, 0,0,1,3)
 
-        embed_grid.addWidget(self.box_carrier,1,0,1,2)
-        embed_grid.addWidget(self.payload_widget, 2, 0, 1, 2)
-        embed_grid.addWidget(self.box_stego,  3,0,1,2)
-        embed_grid.addWidget(self.embed_btn,  4,0)
-        embed_grid.addWidget(self.extract_btn,4,1)
+        # ---------- NEW REGION UI (Video Only) ----------
+        self.region_group = QtWidgets.QGroupBox("Video Region (LSB area)")
+        rg_lay = QtWidgets.QGridLayout(self.region_group)
+        self.region_enable_chk = QtWidgets.QCheckBox("Enable region (video only)")
+        self.region_x = QtWidgets.QSpinBox(); self.region_x.setRange(0, 100000)
+        self.region_y = QtWidgets.QSpinBox(); self.region_y.setRange(0, 100000)
+        self.region_w = QtWidgets.QSpinBox(); self.region_w.setRange(0, 100000)
+        self.region_h = QtWidgets.QSpinBox(); self.region_h.setRange(0, 100000)
+        for sb in (self.region_x, self.region_y, self.region_w, self.region_h):
+            sb.setEnabled(False)
+
+        rg_lay.addWidget(self.region_enable_chk, 0,0,1,3)
+        rg_lay.addWidget(QtWidgets.QLabel("X:"),1,0); rg_lay.addWidget(self.region_x,1,1)
+        rg_lay.addWidget(QtWidgets.QLabel("Y:"),1,2); rg_lay.addWidget(self.region_y,1,3)
+        rg_lay.addWidget(QtWidgets.QLabel("W:"),2,0); rg_lay.addWidget(self.region_w,2,1)
+        rg_lay.addWidget(QtWidgets.QLabel("H:"),2,2); rg_lay.addWidget(self.region_h,2,3)
+
+        self.region_preview_btn = QtWidgets.QPushButton("Preview Region")
+        self.region_pick_btn = QtWidgets.QPushButton("Pick (Interactive)")
+        self.region_preview_btn.setEnabled(False)
+        self.region_pick_btn.setEnabled(False)
+        rg_lay.addWidget(self.region_preview_btn,3,0,1,2)
+        rg_lay.addWidget(self.region_pick_btn,3,2,1,2)
+
+        embed_grid.addWidget(self.region_group,1,0,1,3)
+        # ------------------------------------------------
+
+        embed_grid.addWidget(self.box_carrier,2,0,1,3)
+        embed_grid.addWidget(self.payload_widget, 3, 0, 1, 3)
+        embed_grid.addWidget(self.box_stego,  4,0,1,3)
+        embed_grid.addWidget(self.embed_btn,  5,0)
+        embed_grid.addWidget(self.extract_btn,5,1)
+        embed_grid.addWidget(self.save_output_btn,5,2)
 
         imgs = QtWidgets.QHBoxLayout()
         imgs.addWidget(self.view_orig)
@@ -281,25 +308,19 @@ class MainWindow(QtWidgets.QWidget):
         vh = QtWidgets.QVBoxLayout(video_holder); vh.setContentsMargins(0,0,0,0); vh.addWidget(self.view_video)
         imgs.addWidget(video_holder)
 
-        embed_grid.addLayout(imgs,5,0,1,2)
-        embed_grid.setSizeConstraint(QtWidgets.QLayout.SetMinAndMaxSize)
-        embed_grid.setRowMinimumHeight(5,300)
-        embed_grid.setRowStretch(5,0)
+        embed_grid.addLayout(imgs,6,0,1,3)
+        embed_grid.setRowMinimumHeight(6,300)
 
         self.analysis_tab = AnalysisWidget()
         self.tabs.addTab(self.analysis_tab, "Steg Analysis")
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.addWidget(self.tabs)
-        status_row = QtWidgets.QHBoxLayout()
-        status_row.addWidget(self.status,1)
-        status_row.addWidget(self.save_output_btn,0)
-        outer.addLayout(status_row)
+        outer.addWidget(self.status)
 
         # Signals
         self.codec_combo.currentTextChanged.connect(self.on_codec_change)
         self.box_carrier.fileDropped.connect(self.on_carrier)
-        #self.box_payload.fileDropped.connect(self.on_payload)
         self.payload_widget.changed.connect(
             lambda: self.status.setText(f"Payload set: {self.payload_widget.payload_name()}")
         )
@@ -308,6 +329,73 @@ class MainWindow(QtWidgets.QWidget):
         self.extract_btn.clicked.connect(self.on_extract)
         self.save_output_btn.clicked.connect(self.on_save_output_as)
 
+        # Region signals
+        self.region_enable_chk.toggled.connect(self._update_region_boxes_enabled)
+        self.region_preview_btn.clicked.connect(self._preview_region)
+        self.region_pick_btn.clicked.connect(self._apply_interactive_region)
+
+        # Initial state
+        self._update_region_boxes_enabled()
+        self.on_codec_change(self.codec_combo.currentText())
+
+    # ---------------- Region Helpers ----------------
+    def _update_region_boxes_enabled(self):
+        enable = self.region_enable_chk.isChecked() and isinstance(self.codec, Mp4Codec)
+        for sb in (self.region_x, self.region_y, self.region_w, self.region_h):
+            sb.setEnabled(enable)
+        self.region_preview_btn.setEnabled(enable and self.carrier and self.codec.accepts(self.carrier))
+        self.region_pick_btn.setEnabled(enable and self.carrier and isinstance(self.codec, Mp4Codec))
+
+    def _current_region(self):
+        if not (self.region_enable_chk.isChecked() and isinstance(self.codec, Mp4Codec)):
+            return None
+        x = self.region_x.value()
+        y = self.region_y.value()
+        w = self.region_w.value()
+        h = self.region_h.value()
+        if w <= 0 or h <= 0:
+            return None
+        return (x, y, w, h)
+
+    def _apply_interactive_region(self):
+        if not (self.carrier and isinstance(self.codec, Mp4Codec)):
+            self.status.setText("Load a video carrier first.")
+            return
+        try:
+            reg = interactive_select_region(self.carrier)
+            if reg is None:
+                self.status.setText("Interactive selection canceled.")
+                return
+            x,y,w,h = reg
+            self.region_x.setValue(x)
+            self.region_y.setValue(y)
+            self.region_w.setValue(w)
+            self.region_h.setValue(h)
+            self.status.setText(f"Region set to (x={x}, y={y}, w={w}, h={h})")
+        except Exception as e:
+            self.status.setText(f"Region pick failed: {e}")
+
+    def _preview_region(self):
+        if not (self.carrier and isinstance(self.codec, Mp4Codec)):
+            self.status.setText("Load a video carrier first.")
+            return
+        reg = self._current_region()
+        if not reg:
+            self.status.setText("Enable region and set non-zero W/H before preview.")
+            return
+        x,y,w,h = reg
+        try:
+            # Save a temporary preview image beside the video
+            tmp = Path(self.carrier).with_name(Path(self.carrier).stem + "__region_preview.png")
+            preview_region(self.carrier, x,y,w,h, frame_index=0, window=False, save_path=tmp)
+            # Show inside diff view
+            im = Image.open(tmp).convert("RGB")
+            self.view_diff.set_image_from_array(np.array(im))
+            self.status.setText(f"Region preview saved: {tmp.name}")
+        except Exception as e:
+            self.status.setText(f"Preview failed: {e}")
+    # ------------------------------------------------
+
     def on_codec_change(self, txt: str):
         self.codec_name = txt
         self.codec = CODECS[txt]
@@ -315,8 +403,10 @@ class MainWindow(QtWidgets.QWidget):
             self.view_video.hide()
             self.view_orig.show(); self.view_steg.show(); self.view_diff.show()
         elif isinstance(self.codec, Mp4Codec):
+            # Nothing special here—region group only meaningful for video
             pass
         self.status.setText(f"Carrier type set to: {txt}")
+        self._update_region_boxes_enabled()
 
     def on_carrier(self, p: Path):
         self.carrier = p
@@ -338,10 +428,22 @@ class MainWindow(QtWidgets.QWidget):
                 self.view_orig.hide()
                 self.view_steg.show(); self.view_diff.show(); self.view_video.show()
                 self.view_video.load(p)
+                # Update spin box limits based on video frame
+                cap = cv2.VideoCapture(str(p))
+                ok, frame = cap.read()
+                cap.release()
+                if ok:
+                    H, W, _ = frame.shape
+                    self.region_x.setRange(0, max(0, W-1))
+                    self.region_y.setRange(0, max(0, H-1))
+                    self.region_w.setRange(0, W)
+                    self.region_h.setRange(0, H)
+                self._update_region_boxes_enabled()
             except Exception as e:
                 self.status.setText(f"No video preview: {e}")
         else:
             self.view_orig.setText(p.name)
+        self._update_region_boxes_enabled()
 
     def on_stego(self, p: Path):
         self.stego = p
@@ -361,7 +463,6 @@ class MainWindow(QtWidgets.QWidget):
         self.status.setText(f"Payload set: {p.name}")
 
     def on_embed(self):
-        # 1) Basic checks
         if not self.carrier or not self.payload_widget.has_payload():
             self.status.setText("Select a carrier and provide a payload (file or text).")
             return
@@ -369,39 +470,48 @@ class MainWindow(QtWidgets.QWidget):
             self.status.setText(f"{self.codec.pretty} expects a different carrier type.")
             return
 
-        # 2) Collect params
         bpc = int(self.bpc_spin.value())
         key = self.key_edit.text()
         payload = self.payload_widget.payload_bytes()
 
-        # Optional: guard against empty typed text
         if not payload:
             self.status.setText("Payload is empty.")
             return
 
-        # 3) Do the embed
+        region = self._current_region() if isinstance(self.codec, Mp4Codec) else None
+        if region:
+            x,y,w,h = region
+            if w <= 0 or h <= 0:
+                self.status.setText("Region width/height must be > 0.")
+                return
+
         try:
             stem = Path(self.carrier).stem
             out_path = Path(self.carrier).with_name(f"{stem}__steg")
-            result = self.codec.embed(self.carrier, payload, out_path, bpc, key)
-
-            if isinstance(self.codec, ImageCodec):
+            # Pass region if video
+            if isinstance(self.codec, Mp4Codec):
+                result = self.codec.embed(self.carrier, payload, out_path, bpc, key, region=region)
+                self.view_diff.setText("Video embedding complete (region mode)" if region else "Video embedding complete (full frame)")
+                out_file = Path(result["out"])
+            elif isinstance(self.codec, ImageCodec):
+                result = self.codec.embed(self.carrier, payload, out_path, bpc, key)
                 self.view_steg.set_image_from_array(result["steg"])
                 self.view_orig.set_image_from_array(result["orig"])
                 mask_rgb = np.stack([result["mask"]]*3, axis=2)
                 self.view_diff.set_image_from_array(mask_rgb)
                 out_file = Path(result.get("out_path", out_path.with_suffix(".png")))
             else:
+                # WAV or others
+                result = self.codec.embed(self.carrier, payload, out_path, bpc, key)
                 self.view_diff.setText(f"Modified samples ≈ {result['changed_pct']:.2f}%")
                 out_file = Path(result["out"])
 
             self.last_output_path = out_file
             self.save_output_btn.setEnabled(True)
-            self.status.setText(f"✅ Embedded → {out_file}")
+            self.status.setText(f"✅ Embedded → {out_file.name}")
 
         except Exception as e:
             self.status.setText(f"❌ Embed failed: {e}")
-
 
     def on_extract(self):
         if not self.stego:
@@ -409,23 +519,24 @@ class MainWindow(QtWidgets.QWidget):
         if not self.codec.accepts(self.stego):
             self.status.setText(f"{self.codec.pretty} expects a different stego file type."); return
         bpc = int(self.bpc_spin.value()); key = self.key_edit.text()
+        region = self._current_region() if isinstance(self.codec, Mp4Codec) else None
         try:
-            data = self.codec.extract(self.stego, bpc, key)
+            if isinstance(self.codec, Mp4Codec):
+                data = self.codec.extract(self.stego, bpc, key, region=region)
+            else:
+                data = self.codec.extract(self.stego, bpc, key)
             out = Path(self.stego).with_name(Path(self.stego).stem + "__recovered.bin")
             out.write_bytes(data)
             self.status.setText(f"✅ Extracted payload → {out.name}")
         except Exception as e:
             msg = str(e)
             if "Invalid/missing header" in msg and isinstance(self.codec, WavCodec):
-                # Helpful hint + optional attempt to locate correct bpc
-                self.status.setText("❌ Invalid header. (Did you select the original carrier or wrong LSB count?) Trying other bpc values...")
+                self.status.setText("❌ Invalid header. Trying other bpc values...")
                 self._attempt_other_bpcs(key)
             else:
                 self.status.setText(f"❌ Extract failed: {e}")
 
     def _attempt_other_bpcs(self, key: str):
-        """Try all bpc 1..8 to see if exactly one yields a valid header+checksum.
-           If found, perform extraction and inform user."""
         if not self.stego or not isinstance(self.codec, WavCodec):
             return
         successes = []
@@ -444,7 +555,7 @@ class MainWindow(QtWidgets.QWidget):
         elif len(successes) > 1:
             self.status.setText(f"❌ Multiple possible bpc values ({[b for b,_ in successes]}). Please recall which was used.")
         else:
-            self.status.setText("❌ Could not find a valid header for any bpc 1..8. Are you sure this is the stego file?")
+            self.status.setText("❌ Could not find valid header for any bpc 1..8.")
 
     def on_save_output_as(self):
         if not self.last_output_path or not Path(self.last_output_path).exists():
