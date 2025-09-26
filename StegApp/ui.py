@@ -8,7 +8,7 @@ from wav_codec import WavCodec
 from PIL import Image
 from typing import Optional
 from mp4_codec import Mp4Codec
-
+from analysis_widget import AnalysisWidget
 
 CODECS = {
     "Image (PNG/BMP/TIFF)": ImageCodec(),
@@ -80,37 +80,47 @@ class MainWindow(QtWidgets.QWidget):
         self.save_output_btn.setEnabled(False)
 
 
-        # Layout
+        # --- Tabs ---
+        self.tabs = QtWidgets.QTabWidget(self)
+
+        # Tab 1: Embed / Extract
+        self.embed_tab = QtWidgets.QWidget()
+        self.tabs.addTab(self.embed_tab, "Embed / Extract")
+
+        embed_grid = QtWidgets.QGridLayout(self.embed_tab)
+
         form = QtWidgets.QFormLayout()
         form.addRow("Carrier Type:", self.codec_combo)
         form.addRow("LSBs per channel:", self.bpc_spin)
         form.addRow("Key:", self.key_edit)
+        embed_grid.addLayout(form, 0, 0, 1, 2)
 
-        grid = QtWidgets.QGridLayout(self)
-        grid.addLayout(form, 0, 0, 1, 2)
+        embed_grid.addWidget(self.box_carrier, 1, 0, 1, 2)
+        embed_grid.addWidget(self.box_payload, 2, 0, 1, 2)
+        embed_grid.addWidget(self.box_stego,   3, 0, 1, 2)
 
-        grid.addWidget(self.box_carrier, 1, 0, 1, 2)
-        grid.addWidget(self.box_payload, 2, 0, 1, 2)
-        grid.addWidget(self.box_stego,   3, 0, 1, 2)
+        embed_grid.addWidget(self.embed_btn,   4, 0)
+        embed_grid.addWidget(self.extract_btn, 4, 1)
 
-        # Action buttons
-        grid.addWidget(self.embed_btn,   4, 0)
-        grid.addWidget(self.extract_btn, 4, 1)
-
-        # Image previews (row 5)
         imgs = QtWidgets.QHBoxLayout()
         imgs.addWidget(self.view_orig)
         imgs.addWidget(self.view_steg)
         imgs.addWidget(self.view_diff)
         imgs.addWidget(self.view_video)
-        self.view_video.hide() 
-        grid.addLayout(imgs, 5, 0, 1, 2)
+        imgs.addStretch(1) 
+        self.view_video.hide()
+        embed_grid.addLayout(imgs, 5, 0, 1, 2)
 
-        # Save row (row 6)
-        grid.addWidget(self.save_output_btn, 6, 0, 1, 2)
+        embed_grid.addWidget(self.save_output_btn, 6, 0, 1, 2)
+        embed_grid.addWidget(self.status,          7, 0, 1, 2)
 
-        # Status bar (row 7)
-        grid.addWidget(self.status, 7, 0, 1, 2)
+        # Tab 2: Steg Analysis
+        self.analysis_tab = AnalysisWidget()
+        self.tabs.addTab(self.analysis_tab, "Steg Analysis")
+
+        # Make tabs the outer layout
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.addWidget(self.tabs)
 
         # Signals
         self.codec_combo.currentTextChanged.connect(self.on_codec_change)
@@ -122,16 +132,28 @@ class MainWindow(QtWidgets.QWidget):
         self.save_output_btn.clicked.connect(self.on_save_output_as)
 
     def on_codec_change(self, txt: str):
-        self.codec_name = txt; self.codec = CODECS[txt]
+        self.codec_name = txt
+        self.codec = CODECS[txt]
+        # Reset preview visibilities on change
+        if isinstance(self.codec, ImageCodec):
+            self.view_video.hide()
+            self.view_orig.show()
+            self.view_steg.show()
+            self.view_diff.show()
+        elif isinstance(self.codec, Mp4Codec):
+            # For video, we’ll show the video player; image labels are still there
+            pass
         self.status.setText(f"Carrier type set to: {txt}")
 
     def on_carrier(self, p: Path):
         self.carrier = p
-        # preview only for images
         if isinstance(self.codec, ImageCodec):
             try:
-                img = Image.open(p).convert("RGBA" if Image.open(p).mode=="RGBA" else "RGB")
-                self.view_orig.set_image_from_array(np.array(img))
+                im = Image.open(p)
+                rgb = im.convert("RGBA" if im.mode == "RGBA" else "RGB")
+                self.view_video.hide()
+                self.view_orig.show()
+                self.view_orig.set_image_from_array(np.array(rgb))
             except Exception as e:
                 self.view_orig.setText(f"No preview:\n{e}")
         elif isinstance(self.codec, Mp4Codec):
@@ -141,26 +163,23 @@ class MainWindow(QtWidgets.QWidget):
                 self.view_video.load(p)
             except Exception as e:
                 self.status.setText(f"No video preview: {e}")
-
         else:
             self.view_orig.setText(p.name)
 
-    def on_payload(self, p: Path): self.payload = p
     def on_stego(self, p: Path):
         self.stego = p
         if isinstance(self.codec, ImageCodec):
             try:
-                self.view_steg.set_image_from_array(np.array(Image.open(p).convert("RGB")))
-            except Exception: self.view_steg.setText(p.name)
+                im = Image.open(p).convert("RGB")
+                self.view_steg.set_image_from_array(np.array(im))
+            except Exception:
+                self.view_steg.setText(p.name)
         elif isinstance(self.codec, Mp4Codec):
-            try:
-                self.view_steg.setText("Preview not implemented yet")
-                # Or: self.view_video.load(p) if you want playback for stego
-            except Exception as e:
-                self.status.setText(f"No video preview: {e}")
-
+            # Option: play stego video too; for now we just set a label
+            self.view_steg.setText("Preview not implemented yet")
         else:
             self.view_steg.setText(p.name)
+
 
     def on_embed(self):
         if not self.carrier or not self.payload:
@@ -218,6 +237,8 @@ class MainWindow(QtWidgets.QWidget):
             filt = "PNG Image (*.png);;All Files (*)"
         elif suffix == ".wav":
             filt = "WAV Audio (*.wav);;All Files (*)"
+        elif suffix == ".mp4":
+            filt = "MP4 Video (*.mp4);;All Files (*)"
         else:
             filt = "All Files (*)"
 
@@ -234,3 +255,9 @@ class MainWindow(QtWidgets.QWidget):
             self.status.setText(f"✅ Saved a copy to: {dest}")
         except Exception as e:
             self.status.setText(f"❌ Save failed: {e}")
+
+    def on_payload(self, p: Path):
+        self.payload = p
+        # Optional: give some feedback
+        self.status.setText(f"Payload set: {p.name}")
+
