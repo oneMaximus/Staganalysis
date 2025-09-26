@@ -48,8 +48,14 @@ class DropBox(QtWidgets.QGroupBox):
 
 class ImageView(QtWidgets.QLabel):
     def __init__(self, title: str):
-        super().__init__(); self.setAlignment(QtCore.Qt.AlignCenter); self.setFrameShape(QtWidgets.QFrame.Box)
-        self.setMinimumSize(240, 240); self.setToolTip(title)
+        super().__init__()
+        self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setFrameShape(QtWidgets.QFrame.Box)
+        self.setMinimumSize(240, 240)
+        self.setToolTip(title)
+        # NEW: match the video row behavior (vertical Fixed, horizontal Expanding)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.setMaximumHeight(300)   # same as the video row
     def set_image_from_array(self, arr: np.ndarray):
         if arr.ndim == 2:
             h,w = arr.shape; qimg = QtGui.QImage(arr.data, w, h, w, QtGui.QImage.Format_Grayscale8)
@@ -61,9 +67,14 @@ class ImageView(QtWidgets.QLabel):
                 qimg = QtGui.QImage(arr.data, w, h, 4*w, QtGui.QImage.Format_RGBA8888)
         pix = QtGui.QPixmap.fromImage(qimg).scaled(self.width(), self.height(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
         self.setPixmap(pix)
+# --- keep this subclass at top (as you already have) ---
+class FixedVideoWidget(QVideoWidget):
+    def sizeHint(self):
+        # stable size hint so layout won't grow after metadata arrives
+        return QtCore.QSize(480, 270)
 
 class VideoPlayer(QtWidgets.QWidget):
-    """Try QMediaPlayer first; if it errors/unsupported, fallback to OpenCV frame pump."""
+    """Prefer QMediaPlayer; on error, fall back to OpenCV frame pump."""
     def __init__(self, title: str):
         super().__init__()
         lay = QtWidgets.QVBoxLayout(self)
@@ -72,31 +83,33 @@ class VideoPlayer(QtWidgets.QWidget):
         self.title_lbl = QtWidgets.QLabel(title)
         lay.addWidget(self.title_lbl)
 
-        # --- Primary player ---
+        # Primary player wired ONCE
         self.player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
-        self.video_widget = QVideoWidget()
-        # keep layout stable
+
+        self.video_widget = FixedVideoWidget()
+        self.video_widget.setMinimumSize(480, 270)
+        self.video_widget.setMaximumHeight(270)
+        self.video_widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         if hasattr(self.video_widget, "setAspectRatioMode"):
             self.video_widget.setAspectRatioMode(QtCore.Qt.KeepAspectRatio)
-        self.video_widget.setMinimumSize(320, 180)
-        self.video_widget.setMaximumHeight(260)
-        self.video_widget.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
         lay.addWidget(self.video_widget)
+
         self.player.setVideoOutput(self.video_widget)
         self.player.setMuted(True)
 
-        # --- Fallback (OpenCV) ---
+        # Fallback (OpenCV) label with same geometry constraints
         self.cv_label = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
         self.cv_label.setFrameShape(QtWidgets.QFrame.Box)
-        self.cv_label.setMinimumSize(320, 180)
-        self.cv_label.setMaximumHeight(260)
-        self.cv_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+        self.cv_label.setMinimumSize(480, 270)
+        self.cv_label.setMaximumHeight(270)
+        self.cv_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.cv_label.setScaledContents(True)
         self.cv_label.hide()
         lay.addWidget(self.cv_label)
 
-        # Constrain the container so row height stays steady
+        # Constrain the container so the row height stays steady
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.setMinimumHeight(300)
         self.setMaximumHeight(300)
 
         # Fallback machinery
@@ -139,10 +152,9 @@ class VideoPlayer(QtWidgets.QWidget):
             self.cv_label.setText("Could not open video (fallback).")
             self.cv_label.show()
             return
-        fps = self._cap.get(5) or 30.0  # CAP_PROP_FPS = 5
-        interval = int(max(15, 1000.0 / fps))
+        fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self._timer.start(int(max(15, 1000.0 / fps)))
         self.cv_label.show()
-        self._timer.start(interval)
 
     def _next_frame(self):
         import cv2
@@ -180,6 +192,7 @@ class VideoPlayer(QtWidgets.QWidget):
         super().closeEvent(e)
 
 
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__(); self.setWindowTitle("Steg Lab — Image & WAV LSB")
@@ -193,7 +206,6 @@ class MainWindow(QtWidgets.QWidget):
         self.key_edit = QtWidgets.QLineEdit(); self.key_edit.setPlaceholderText("Key (optional)")
         self.embed_btn = QtWidgets.QPushButton("Embed ▶"); self.extract_btn = QtWidgets.QPushButton("Extract ⏏")
         self.status = QtWidgets.QLabel("Ready."); self.status.setWordWrap(True)
-        self.status.setText("⚠️ Falling back to OpenCV preview")
 
         self.view_orig = ImageView("Original"); self.view_steg = ImageView("Embedded"); self.view_diff = ImageView("Change map / metric")
         self.last_output_path: Optional[Path] = None  # file produced by last Embed
@@ -215,11 +227,9 @@ class MainWindow(QtWidgets.QWidget):
         form.addRow("LSBs per channel:", self.bpc_spin)
         form.addRow("Key:", self.key_edit)
         embed_grid.addLayout(form, 0, 0, 1, 2)
-
         embed_grid.addWidget(self.box_carrier, 1, 0, 1, 2)
         embed_grid.addWidget(self.box_payload, 2, 0, 1, 2)
         embed_grid.addWidget(self.box_stego,   3, 0, 1, 2)
-
         embed_grid.addWidget(self.embed_btn,   4, 0)
         embed_grid.addWidget(self.extract_btn, 4, 1)
 
@@ -227,13 +237,30 @@ class MainWindow(QtWidgets.QWidget):
         imgs.addWidget(self.view_orig)
         imgs.addWidget(self.view_steg)
         imgs.addWidget(self.view_diff)
-        imgs.addWidget(self.view_video)
-        imgs.addStretch(1) 
+        #imgs.addWidget(self.view_video)
+        #imgs.addStretch(1) 
         self.view_video.hide()
         embed_grid.addLayout(imgs, 5, 0, 1, 2)
+        # Row constraints
+        embed_grid.setSizeConstraint(QtWidgets.QLayout.SetMinAndMaxSize)
+        embed_grid.setRowMinimumHeight(5, 300)
+        embed_grid.setRowStretch(5, 0)
 
-        embed_grid.addWidget(self.save_output_btn, 6, 0, 1, 2)
-        embed_grid.addWidget(self.status,          7, 0, 1, 2)
+        # VideoPlayer container (already created above)
+        self.view_video.setMinimumHeight(300)
+        self.view_video.setMaximumHeight(300)
+        self.view_video.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+        video_holder = QtWidgets.QFrame()
+        video_holder.setFrameShape(QtWidgets.QFrame.NoFrame)
+        video_holder.setMinimumHeight(300)
+        video_holder.setMaximumHeight(300)
+        vh_layout = QtWidgets.QVBoxLayout(video_holder)
+        vh_layout.setContentsMargins(0,0,0,0)
+        vh_layout.addWidget(self.view_video)
+
+        imgs.addWidget(video_holder)
+
 
         # Tab 2: Steg Analysis
         self.analysis_tab = AnalysisWidget()
@@ -241,6 +268,7 @@ class MainWindow(QtWidgets.QWidget):
 
         # Make tabs the outer layout
         outer = QtWidgets.QVBoxLayout(self)
+        
         outer.addWidget(self.tabs)
 
         # Signals
