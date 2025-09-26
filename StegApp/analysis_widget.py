@@ -55,7 +55,7 @@ class IntensityHistogram(QtWidgets.QWidget):
         self.ax = self.fig.add_subplot(111)
         self.ax.set_title("Channel intensity histogram")
         self.ax.set_xlabel("Pixel intensity (0–255)")
-        self.ax.set_ylabel("# of pixels")
+        self.ax.set_ylabel("No. of pixels")
         # Pre-create 256 bars so we only change heights
         self.bars = self.ax.bar(np.arange(256), np.zeros(256), width=1.0, align="center")
         self.ax.set_xlim(-0.5, 255.5)
@@ -90,6 +90,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.channel = QtWidgets.QComboBox()
         self.channel.addItems(["Red", "Green", "Blue"])
         self.bit_spin = QtWidgets.QSpinBox(); self.bit_spin.setRange(1, 8); self.bit_spin.setValue(1)
+        self.bit_spin.setMinimumHeight(30)
 
         ctrl = QtWidgets.QHBoxLayout()
         ctrl.addWidget(QtWidgets.QLabel("Channel:"))

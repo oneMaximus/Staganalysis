@@ -236,7 +236,9 @@ class MainWindow(QtWidgets.QWidget):
         self.box_carrier = DropBox("Carrier")
         self.payload_widget = PayloadWidget("Payload")
         self.box_stego   = DropBox("Stego (for Extract)")
-        self.bpc_spin = QtWidgets.QSpinBox(); self.bpc_spin.setRange(1,8); self.bpc_spin.setValue(1)
+        self.bpc_spin = QtWidgets.QSpinBox(); self.bpc_spin.setRange(0,7); self.bpc_spin.setValue(1)
+        self.bpc_spin.setMinimumHeight(30)
+
         self.key_edit = QtWidgets.QLineEdit(); self.key_edit.setPlaceholderText("Key (optional)")
         self.embed_btn = QtWidgets.QPushButton("Embed ▶")
         self.extract_btn = QtWidgets.QPushButton("Extract ⏏")
