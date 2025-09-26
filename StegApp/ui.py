@@ -2,6 +2,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
 import numpy as np
+import cv2
 from pathlib import Path
 from image_codec import ImageCodec
 from wav_codec import WavCodec
@@ -15,6 +16,21 @@ CODECS = {
     "Audio (WAV PCM)"     : WavCodec(),
     "Video (MP4 H.264)"   : Mp4Codec(),
 }
+
+# add near top of ui.py
+EXT_TO_CODEC = {
+    ".mp4": "Video (MP4 H.264)",
+    ".mov": "Video (MP4 H.264)",
+    ".m4v": "Video (MP4 H.264)",
+    ".wav": "Audio (WAV PCM)",
+    ".png": "Image (PNG/BMP/TIFF)",
+    ".bmp": "Image (PNG/BMP/TIFF)",
+    ".tif": "Image (PNG/BMP/TIFF)",
+    ".tiff":"Image (PNG/BMP/TIFF)",
+    ".jpg": "Image (PNG/BMP/TIFF)",
+    ".jpeg":"Image (PNG/BMP/TIFF)",
+}
+
 
 class DropBox(QtWidgets.QGroupBox):
     fileDropped = QtCore.pyqtSignal(Path)
@@ -47,18 +63,122 @@ class ImageView(QtWidgets.QLabel):
         self.setPixmap(pix)
 
 class VideoPlayer(QtWidgets.QWidget):
+    """Try QMediaPlayer first; if it errors/unsupported, fallback to OpenCV frame pump."""
     def __init__(self, title: str):
         super().__init__()
-        layout = QtWidgets.QVBoxLayout(self)
-        self.setLayout(layout)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        self.title_lbl = QtWidgets.QLabel(title)
+        lay.addWidget(self.title_lbl)
+
+        # --- Primary player ---
         self.player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
         self.video_widget = QVideoWidget()
-        layout.addWidget(self.video_widget)
+        # keep layout stable
+        if hasattr(self.video_widget, "setAspectRatioMode"):
+            self.video_widget.setAspectRatioMode(QtCore.Qt.KeepAspectRatio)
+        self.video_widget.setMinimumSize(320, 180)
+        self.video_widget.setMaximumHeight(260)
+        self.video_widget.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+        lay.addWidget(self.video_widget)
         self.player.setVideoOutput(self.video_widget)
+        self.player.setMuted(True)
+
+        # --- Fallback (OpenCV) ---
+        self.cv_label = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
+        self.cv_label.setFrameShape(QtWidgets.QFrame.Box)
+        self.cv_label.setMinimumSize(320, 180)
+        self.cv_label.setMaximumHeight(260)
+        self.cv_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+        self.cv_label.setScaledContents(True)
+        self.cv_label.hide()
+        lay.addWidget(self.cv_label)
+
+        # Constrain the container so row height stays steady
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.setMaximumHeight(300)
+
+        # Fallback machinery
+        self._cap = None
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._next_frame)
+        self._path = None
+
+        # Qt Multimedia errors -> fallback
+        if hasattr(self.player, "errorOccurred"):
+            self.player.errorOccurred.connect(self._on_qt_error)
+        else:
+            self.player.error.connect(self._on_qt_error)
+        self.player.mediaStatusChanged.connect(self._on_media_status)
 
     def load(self, path: Path):
+        self.stop()
+        self._path = Path(path)
+        self.video_widget.show()
+        self.cv_label.hide()
         self.player.setMedia(QMediaContent(QtCore.QUrl.fromLocalFile(str(path))))
         self.player.play()
+
+    def _on_media_status(self, status):
+        if status == QMediaPlayer.InvalidMedia and self._path:
+            self._switch_to_cv()
+
+    def _on_qt_error(self, *_):
+        self._switch_to_cv()
+
+    def _switch_to_cv(self):
+        self.player.stop()
+        self.video_widget.hide()
+        self._start_cv_fallback(self._path)
+
+    def _start_cv_fallback(self, path: Path):
+        import cv2
+        self._cap = cv2.VideoCapture(str(path))
+        if not self._cap.isOpened():
+            self.cv_label.setText("Could not open video (fallback).")
+            self.cv_label.show()
+            return
+        fps = self._cap.get(5) or 30.0  # CAP_PROP_FPS = 5
+        interval = int(max(15, 1000.0 / fps))
+        self.cv_label.show()
+        self._timer.start(interval)
+
+    def _next_frame(self):
+        import cv2
+        if not self._cap:
+            return
+        ok, frame = self._cap.read()
+        if not ok:
+            self.stop()
+            return
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = frame.shape
+        qimg = QtGui.QImage(frame.data, w, h, ch * w, QtGui.QImage.Format_RGB888)
+        pix = QtGui.QPixmap.fromImage(qimg).scaled(
+            self.cv_label.width(), self.cv_label.height(),
+            QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+        )
+        self.cv_label.setPixmap(pix)
+
+    def stop(self):
+        try:
+            self.player.stop()
+        except:
+            pass
+        if self._timer.isActive():
+            self._timer.stop()
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except:
+                pass
+            self._cap = None
+
+    def closeEvent(self, e):
+        self.stop()
+        super().closeEvent(e)
+
 
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
@@ -73,6 +193,7 @@ class MainWindow(QtWidgets.QWidget):
         self.key_edit = QtWidgets.QLineEdit(); self.key_edit.setPlaceholderText("Key (optional)")
         self.embed_btn = QtWidgets.QPushButton("Embed ▶"); self.extract_btn = QtWidgets.QPushButton("Extract ⏏")
         self.status = QtWidgets.QLabel("Ready."); self.status.setWordWrap(True)
+        self.status.setText("⚠️ Falling back to OpenCV preview")
 
         self.view_orig = ImageView("Original"); self.view_steg = ImageView("Embedded"); self.view_diff = ImageView("Change map / metric")
         self.last_output_path: Optional[Path] = None  # file produced by last Embed
@@ -147,22 +268,36 @@ class MainWindow(QtWidgets.QWidget):
 
     def on_carrier(self, p: Path):
         self.carrier = p
+
+        # auto-switch codec by extension
+        ext = p.suffix.lower()
+        auto = EXT_TO_CODEC.get(ext)
+        if auto and self.codec_combo.currentText() != auto:
+            self.codec_combo.setCurrentText(auto)
+            # on_codec_change() will run and adjust visibilities
+
         if isinstance(self.codec, ImageCodec):
             try:
                 im = Image.open(p)
                 rgb = im.convert("RGBA" if im.mode == "RGBA" else "RGB")
                 self.view_video.hide()
                 self.view_orig.show()
+                self.view_steg.show()
+                self.view_diff.show()
                 self.view_orig.set_image_from_array(np.array(rgb))
             except Exception as e:
                 self.view_orig.setText(f"No preview:\n{e}")
+
         elif isinstance(self.codec, Mp4Codec):
             try:
                 self.view_orig.hide()
+                self.view_steg.show()
+                self.view_diff.show()
                 self.view_video.show()
-                self.view_video.load(p)
+                self.view_video.load(p)   # see improved VideoPlayer below
             except Exception as e:
                 self.status.setText(f"No video preview: {e}")
+
         else:
             self.view_orig.setText(p.name)
 

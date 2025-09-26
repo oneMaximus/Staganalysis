@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Tuple
 
-import numpy as np
 from PIL import Image
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+import numpy as np
+
 
 # optional: first-frame video support if OpenCV is present
 try:
@@ -68,136 +70,115 @@ class ImageView(QtWidgets.QLabel):
         )
         self.setPixmap(pix)
 
-
 class AnalysisWidget(QtWidgets.QWidget):
-    """
-    Steg analysis page:
-      - Drop an image/video
-      - Choose channel: R/G/B
-      - Choose bit-plane: 1..8 (1=LSB, 8=MSB)
-      - Preview selected bit-plane as black & white
-      - Optional: 'Show All 8 Bits' grid
-    """
     def __init__(self):
         super().__init__()
-        self.src_path: Optional[Path] = None
-        self.src_rgb: Optional[np.ndarray] = None  # HxWx3 uint8
+        # --- controls ---
+        self.file_lbl = QtWidgets.QLabel("Drop an image or video (mp4/mov/m4v) here")
+        self.file_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self.file_lbl.setFrameShape(QtWidgets.QFrame.Box)
+        self.file_lbl.setMinimumHeight(80)
 
-        # Controls
-        self.drop = DropBox("Steg Analysis — Drop an image or video")
-        self.chan_combo = QtWidgets.QComboBox()
-        self.chan_combo.addItems(["Red", "Green", "Blue"])
-        self.bit_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.bit_slider.setRange(1, 8)  # 1..8
-        self.bit_slider.setValue(1)
-        self.bit_label = QtWidgets.QLabel("Bit: 1 (LSB)")
-        self.btn_all = QtWidgets.QPushButton("Show All 8 Bit-Planes")
+        self.channel = QtWidgets.QComboBox()
+        self.channel.addItems(["Red","Green","Blue"])
+        self.bit_spin = QtWidgets.QSpinBox(); self.bit_spin.setRange(1,8); self.bit_spin.setValue(1)
 
-        # Previews
-        self.preview = ImageView("Bit-plane preview (B/W)")
+        self.view = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
+        self.view.setFrameShape(QtWidgets.QFrame.Box)
+        self.view.setMinimumSize(480,270)
+        self.view.setMaximumHeight(360)
+        self.view.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
 
-        # Layout
-        form = QtWidgets.QFormLayout()
-        form.addRow("Channel:", self.chan_combo)
-        form.addRow("View Bit (1=LSB, 8=MSB):", self.bit_slider)
+        lay = QtWidgets.QVBoxLayout(self)
+        ctrl = QtWidgets.QHBoxLayout()
+        ctrl.addWidget(QtWidgets.QLabel("Channel:")); ctrl.addWidget(self.channel)
+        ctrl.addWidget(QtWidgets.QLabel("Bit plane (1=LSB):")); ctrl.addWidget(self.bit_spin)
+        lay.addWidget(self.file_lbl); lay.addLayout(ctrl); lay.addWidget(self.view)
 
-        top = QtWidgets.QVBoxLayout(self)
-        top.addWidget(self.drop)
-        top.addLayout(form)
-        top.addWidget(self.bit_label)
-        top.addWidget(self.preview)
-        top.addWidget(self.btn_all, alignment=QtCore.Qt.AlignRight)
+        # drag&drop
+        self.setAcceptDrops(True)
 
-        # Signals
-        self.drop.fileDropped.connect(self.on_file)
-        self.chan_combo.currentIndexChanged.connect(self.update_preview)
-        self.bit_slider.valueChanged.connect(self.on_bit_change)
-        self.btn_all.clicked.connect(self.show_all_bits)
+        # state
+        self._img = None                # numpy array for still images
+        self._cap = None                # cv2.VideoCapture for video
+        self._timer = QtCore.QTimer(self); self._timer.timeout.connect(self._tick)
+        self._fps_interval = 33
 
-    # ---------- file/load helpers ----------
-    def on_file(self, p: Path):
-        self.src_path = p
+        self.channel.currentIndexChanged.connect(self._refresh)
+        self.bit_spin.valueChanged.connect(self._refresh)
+
+    # ----- drag & drop for analysis tab -----
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls(): e.acceptProposedAction()
+    def dropEvent(self, e):
+        urls = e.mimeData().urls()
+        if not urls: return
+        p = Path(urls[0].toLocalFile())
+        self.load_path(p)
+
+    def load_path(self, p: Path):
+        self.file_lbl.setText(p.name)
+        self._stop_video()
+
         ext = p.suffix.lower()
-        try:
-            if ext in IMG_EXTS:
-                self.src_rgb = self._load_image_as_rgb(p)
-            elif ext in VID_EXTS:
-                self.src_rgb = self._load_video_first_frame(p)
-            else:
-                raise ValueError("Unsupported file type. Drop an image (PNG/BMP/TIFF/JPG) or video (MP4/MOV/AVI/MKV).")
-            self.update_preview()
-        except Exception as e:
-            self.src_rgb = None
-            self.preview.setText(f"Load failed:\n{e}")
+        if ext in {".mp4", ".mov", ".m4v", ".avi", ".mkv"}:
+            if not _HAS_CV2:
+                self.view.setText("OpenCV not installed; cannot open video.")
+                return
+            self._cap = cv2.VideoCapture(str(p))
+            if not self._cap.isOpened():
+                self.view.setText("Could not open video.")
+                return
+            fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
+            self._fps_interval = int(max(15, 1000.0 / fps))
+            self._timer.start(self._fps_interval)
+            self._img = None
+        else:
+            # still image
+            im = Image.open(p).convert("RGB")
+            self._img = np.array(im)
+            self._refresh()
 
-    def _load_image_as_rgb(self, p: Path) -> np.ndarray:
-        im = Image.open(p).convert("RGB")
-        return np.array(im, dtype=np.uint8)
+    def _stop_video(self):
+        if self._timer.isActive(): self._timer.stop()
+        if self._cap is not None:
+            try: self._cap.release()
+            except: pass
+            self._cap = None
 
-    def _load_video_first_frame(self, p: Path) -> np.ndarray:
-        if not _HAS_CV2:
-            raise RuntimeError("OpenCV not available. Install 'opencv-python' to analyze videos.")
-        cap = cv2.VideoCapture(str(p))
-        if not cap.isOpened():
-            raise RuntimeError("Could not open video.")
-        ok, frame = cap.read()
-        cap.release()
-        if not ok or frame is None:
-            raise RuntimeError("Could not read first frame.")
-        # BGR -> RGB
+    def _tick(self):
+        if not self._cap: return
+        ok, frame = self._cap.read()
+        if not ok:
+            self._stop_video(); return
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        return frame.astype(np.uint8)
+        self._render_bitplane(frame)
 
-    # ---------- bit-plane logic ----------
-    @staticmethod
-    def _bit_plane(arr: np.ndarray, channel_idx: int, bit_ui: int) -> np.ndarray:
-        """
-        arr: HxWx3 uint8 RGB
-        channel_idx: 0=R,1=G,2=B
-        bit_ui: 1..8 (1=LSB → bit 0; 8=MSB → bit 7)
-        returns HxW uint8 (0 or 255)
-        """
-        bit = bit_ui - 1
-        plane = ((arr[:, :, channel_idx] >> bit) & 1) * 255
-        return plane.astype(np.uint8)
+    def _refresh(self):
+        if self._img is not None:
+            self._render_bitplane(self._img)
 
-    def on_bit_change(self, v: int):
-        self.bit_label.setText(f"Bit: {v} ({'LSB' if v == 1 else 'MSB' if v == 8 else ''})")
-        self.update_preview()
+    def _render_bitplane(self, rgb: np.ndarray):
+        # channel index
+        c = self.channel.currentIndex()  # 0=R,1=G,2=B
+        bit = self.bit_spin.value() - 1  # 0..7
+        chan = rgb[:,:,c]
+        plane = ((chan >> bit) & 1).astype(np.uint8) * 255
+        h,w = plane.shape
+        qimg = QtGui.QImage(plane.data, w, h, w, QtGui.QImage.Format_Grayscale8)
+        pix = QtGui.QPixmap.fromImage(qimg).scaled(
+            self.view.width(), self.view.height(),
+            QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+        )
+        self.view.setPixmap(pix)
 
-    def update_preview(self):
-        if self.src_rgb is None:
-            self.preview.setText("No media loaded.")
-            return
-        cidx = self.chan_combo.currentIndex()  # 0 R,1 G,2 B
-        b = self.bit_slider.value()
-        try:
-            plane = self._bit_plane(self.src_rgb, cidx, b)
-            self.preview.set_image_from_array(plane)
-        except Exception as e:
-            self.preview.setText(f"Preview failed:\n{e}")
+    def closeEvent(self, e):
+        self._stop_video()
+        super().closeEvent(e)
 
-    # ---------- all-bits grid ----------
-    def show_all_bits(self):
-        if self.src_rgb is None:
-            return
-        cidx = self.chan_combo.currentIndex()
-        dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle(f"All 8 bit-planes — {['Red','Green','Blue'][cidx]}")
-        grid = QtWidgets.QGridLayout(dlg)
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._img is not None:
+            self._refresh()
 
-        # 2 rows x 4 cols
-        labels = []
-        for bit_ui in range(1, 9):
-            plane = self._bit_plane(self.src_rgb, cidx, bit_ui)
-            lab = ImageView(f"Bit {bit_ui}")
-            lab.setMinimumSize(200, 140)
-            lab.set_image_from_array(plane)
-            labels.append(lab)
 
-        positions = [(r, c) for r in range(2) for c in range(4)]
-        for pos, lab in zip(positions, labels):
-            grid.addWidget(lab, *pos)
-
-        dlg.resize(900, 400)
-        dlg.exec_()
