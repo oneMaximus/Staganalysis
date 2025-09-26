@@ -31,6 +31,80 @@ EXT_TO_CODEC = {
     ".jpeg":"Image (PNG/BMP/TIFF)",
 }
 
+class PayloadWidget(QtWidgets.QGroupBox):
+    """Payload source: either a dropped file or typed text."""
+    changed = QtCore.pyqtSignal()  # emit whenever the payload content changes
+
+    def __init__(self, title="Payload"):
+        super().__init__(title)
+
+        # Tabs: File | Text
+        self.tabs = QtWidgets.QTabWidget()
+        self.file_tab = QtWidgets.QWidget()
+        self.text_tab = QtWidgets.QWidget()
+        self.tabs.addTab(self.file_tab, "File")
+        self.tabs.addTab(self.text_tab, "Text")
+
+        # --- File tab: reuse your DropBox ---
+        self.drop = DropBox("Drop a file here")
+        lay_file = QtWidgets.QVBoxLayout(self.file_tab)
+        lay_file.addWidget(self.drop)
+
+        # --- Text tab: simple editor + encoding picker ---
+        self.text_edit = QtWidgets.QPlainTextEdit()
+        self.text_edit.setPlaceholderText("Type payload text here…")
+        self.text_edit.setMinimumHeight(120)
+
+        self.encoding = QtWidgets.QComboBox()
+        self.encoding.addItems(["utf-8", "utf-16-le", "utf-16-be", "latin-1"])
+        enc_row = QtWidgets.QHBoxLayout()
+        enc_row.addWidget(QtWidgets.QLabel("Encoding:"))
+        enc_row.addWidget(self.encoding)
+        enc_row.addStretch(1)
+
+        lay_text = QtWidgets.QVBoxLayout(self.text_tab)
+        lay_text.addLayout(enc_row)
+        lay_text.addWidget(self.text_edit)
+
+        # group layout
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.addWidget(self.tabs)
+
+        # state
+        self._file_path: Optional[Path] = None
+
+        # signals
+        self.drop.fileDropped.connect(self._on_file)
+        self.text_edit.textChanged.connect(self.changed)
+        self.encoding.currentIndexChanged.connect(self.changed)
+        self.tabs.currentChanged.connect(lambda _: self.changed.emit())
+
+    # ---- API the main window will call ----
+    def has_payload(self) -> bool:
+        return (self.tabs.currentIndex() == 0 and self._file_path is not None) or \
+               (self.tabs.currentIndex() == 1 and len(self.text_edit.toPlainText()) > 0)
+
+    def payload_name(self) -> str:
+        if self.tabs.currentIndex() == 0 and self._file_path:
+            return self._file_path.name
+        txt = self.text_edit.toPlainText()
+        return f"text:{min(20, len(txt))} chars" if txt else "text:empty"
+
+    def payload_bytes(self) -> bytes:
+        if self.tabs.currentIndex() == 0:
+            if not self._file_path:
+                return b""
+            return Path(self._file_path).read_bytes()
+        # text mode
+        enc = self.encoding.currentText()
+        return self.text_edit.toPlainText().encode(enc, errors="replace")
+
+    # ---- internals ----
+    def _on_file(self, p: Path):
+        self._file_path = p
+        self.changed.emit()
+
+
 class DropBox(QtWidgets.QGroupBox):
     fileDropped = QtCore.pyqtSignal(Path)
     def __init__(self, title: str):
@@ -160,7 +234,7 @@ class MainWindow(QtWidgets.QWidget):
 
         self.codec_combo = QtWidgets.QComboBox(); self.codec_combo.addItems(CODECS.keys())
         self.box_carrier = DropBox("Carrier")
-        self.box_payload = DropBox("Payload (any file)")
+        self.payload_widget = PayloadWidget("Payload")
         self.box_stego   = DropBox("Stego (for Extract)")
         self.bpc_spin = QtWidgets.QSpinBox(); self.bpc_spin.setRange(1,8); self.bpc_spin.setValue(1)
         self.key_edit = QtWidgets.QLineEdit(); self.key_edit.setPlaceholderText("Key (optional)")
@@ -188,7 +262,7 @@ class MainWindow(QtWidgets.QWidget):
         embed_grid.addLayout(form, 0,0,1,2)
 
         embed_grid.addWidget(self.box_carrier,1,0,1,2)
-        embed_grid.addWidget(self.box_payload,2,0,1,2)
+        embed_grid.addWidget(self.payload_widget, 2, 0, 1, 2)
         embed_grid.addWidget(self.box_stego,  3,0,1,2)
         embed_grid.addWidget(self.embed_btn,  4,0)
         embed_grid.addWidget(self.extract_btn,4,1)
@@ -223,7 +297,10 @@ class MainWindow(QtWidgets.QWidget):
         # Signals
         self.codec_combo.currentTextChanged.connect(self.on_codec_change)
         self.box_carrier.fileDropped.connect(self.on_carrier)
-        self.box_payload.fileDropped.connect(self.on_payload)
+        #self.box_payload.fileDropped.connect(self.on_payload)
+        self.payload_widget.changed.connect(
+            lambda: self.status.setText(f"Payload set: {self.payload_widget.payload_name()}")
+        )
         self.box_stego.fileDropped.connect(self.on_stego)
         self.embed_btn.clicked.connect(self.on_embed)
         self.extract_btn.clicked.connect(self.on_extract)
@@ -282,45 +359,47 @@ class MainWindow(QtWidgets.QWidget):
         self.status.setText(f"Payload set: {p.name}")
 
     def on_embed(self):
-        if not self.carrier or not self.payload:
-            self.status.setText("Select a carrier and a payload first."); return
+        # 1) Basic checks
+        if not self.carrier or not self.payload_widget.has_payload():
+            self.status.setText("Select a carrier and provide a payload (file or text).")
+            return
         if not self.codec.accepts(self.carrier):
-            self.status.setText(f"{self.codec.pretty} expects a different carrier type."); return
-        bpc = int(self.bpc_spin.value()); key = self.key_edit.text()
+            self.status.setText(f"{self.codec.pretty} expects a different carrier type.")
+            return
+
+        # 2) Collect params
+        bpc = int(self.bpc_spin.value())
+        key = self.key_edit.text()
+        payload = self.payload_widget.payload_bytes()
+
+        # Optional: guard against empty typed text
+        if not payload:
+            self.status.setText("Payload is empty.")
+            return
+
+        # 3) Do the embed
         try:
-            payload_bytes = Path(self.payload).read_bytes()
             stem = Path(self.carrier).stem
             out_path = Path(self.carrier).with_name(f"{stem}__steg")
-            result = self.codec.embed(self.carrier, payload_bytes, out_path, bpc, key)
+            result = self.codec.embed(self.carrier, payload, out_path, bpc, key)
+
             if isinstance(self.codec, ImageCodec):
                 self.view_steg.set_image_from_array(result["steg"])
                 self.view_orig.set_image_from_array(result["orig"])
                 mask_rgb = np.stack([result["mask"]]*3, axis=2)
                 self.view_diff.set_image_from_array(mask_rgb)
                 out_file = Path(result.get("out_path", out_path.with_suffix(".png")))
-                self.status.setText(f"✅ Image embedded → {out_file.name}")
-            elif isinstance(self.codec, WavCodec):
-                out_file = Path(result["out"])
-                self.view_diff.setText(f"Modified samples ≈ {result.get('changed_pct',0.0):.2f}%")
-                self.status.setText(f"✅ Audio embedded → {out_file.name}")
-            elif isinstance(self.codec, Mp4Codec):
-                out_file = Path(result["out"])
-                self.view_diff.setText("Video embedding complete.")
-                self.status.setText(f"✅ Video embedded → {out_file.name}")
             else:
-                out_file = Path(result.get("out", out_path))
-                self.status.setText(f"✅ Embedded → {out_file.name}")
+                self.view_diff.setText(f"Modified samples ≈ {result['changed_pct']:.2f}%")
+                out_file = Path(result["out"])
 
-            # Common post‑embed tasks
             self.last_output_path = out_file
             self.save_output_btn.setEnabled(True)
-
-            # NEW: auto-populate stego box so user can immediately extract
-            self.stego = out_file
-            self.box_stego.label.setText(out_file.name)
+            self.status.setText(f"✅ Embedded → {out_file}")
 
         except Exception as e:
             self.status.setText(f"❌ Embed failed: {e}")
+
 
     def on_extract(self):
         if not self.stego:
