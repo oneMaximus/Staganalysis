@@ -67,68 +67,51 @@ class WavCodec(BaseCodec):
 
     # ---------- embed ----------
     # Start header+payload at the beginning of the selected area: start_sample
-    def embed(self, carrier: Path, payload: bytes, out_path: Path, bpc: int, key: str, start_sample: int = 0) -> dict:
+    def embed(self, carrier: Path, payload: bytes, out_path: Path, bpc: int, key: str) -> dict:
         arr, meta = self._read_wav(carrier)
         frames, chans = arr.shape
         sampwidth = meta["sampwidth"]  # 1 or 2 bytes
-
-        if bpc < 1 or bpc > 8:
-            raise ValueError("bpc must be between 1 and 8 for PCM WAV")
-        if start_sample < 0 or start_sample >= frames:
-            raise ValueError(f"start_sample {start_sample} out of range (0..{frames-1})")
-
+        cap = (frames * chans * bpc)//8
         obf = xor_bytes(payload, key)
-        total = build_header(obf, 0) + obf  # header + payload like video
+        total = build_header(obf, 0) + obf
+        if len(total) > cap:
+            raise ValueError(f"Capacity too small: need {len(total)} B, have ~{cap} B at {bpc} bpc, {chans} ch")
 
-        # Capacity only from start_sample to end (selected area)
-        avail_bits = (frames - start_sample) * chans * bpc
-        need_bits = (HEADER_LEN + len(obf)) * 8
-        if need_bits > avail_bits:
-            need_bytes = HEADER_LEN + len(obf)
-            avail_bytes = avail_bits // 8
-            raise ValueError(
-                f"Capacity too small from start_sample={start_sample}: "
-                f"need {need_bytes} B, have ~{avail_bytes} B at {bpc} bpc, {chans} ch"
-            )
-
-        flat = arr.copy().reshape(-1)
+        flat = arr.copy().reshape(-1)  # interleaved samples
         bits = bits_from_bytes(total)
-        start_idx = start_sample * chans
-
         try:
-            for i in range(start_idx, flat.size):
-                if sampwidth == 1:
-                    # unsigned byte
-                    v = int(flat[i])            # 0..255
-                    u = self._modify_lsb_unsigned(v, bpc, bits)
+            for i in range(flat.size):
+                v = int(flat[i])
+                if sampwidth == 1:  # uint8
+                    u = v
+                    for k in range(bpc):
+                        b = next(bits)
+                        u = (u & (0xFF ^ (1<<k))) | ((b & 1) << k)
                     flat[i] = np.uint8(u)
-                else:
-                    # 16-bit signed sample: convert to unsigned for LSB ops
-                    v_signed = int(flat[i])     # -32768..32767
-                    u = v_signed & 0xFFFF       # 0..65535
-                    u = self._modify_lsb_unsigned(u, bpc, bits)
-                    # Convert back to signed range
-                    v_new = u - 0x10000 if u >= 0x8000 else u
-                    flat[i] = np.int16(v_new)
+                else:               # int16
+                    u = self._set_bits_value(v, bpc, bits)  # returns 0..65535 with bits set
+                    flat[i] = np.int16(u)                   # wrap to int16
         except StopIteration:
-            # Finished embedding earlier than filling all selected samples
-            pass
+            steg = flat.reshape(frames, chans)
+            out_path = out_path.with_suffix(".wav")
+            self._write_wav(out_path, steg, meta)
+            # simple metric: % samples modified in any of the used bit-planes
+            if sampwidth == 1:
+                diff = (arr ^ steg) & ((1<<bpc)-1)
+            else:
+                diff = ((arr.astype(np.uint16) ^ steg.astype(np.uint16)) & ((1<<bpc)-1))
+            changed = float(np.any(diff != 0, axis=1).mean()*100.0)
 
-        steg = flat.reshape(frames, chans)
-        out_path = out_path.with_suffix(".wav")
-        self._write_wav(out_path, steg, meta)
+            return {
+                "out": out_path,
+                "bytes_embedded": len(obf),        # normalized
+                "metric_label": "Samples changed", # normalized
+                "metric_value": changed,           # normalized
+                "changed_pct": changed             # legacy/back-compat
+            }
 
-        # metric: % frames with any change in the used bpc bit-planes
-        if sampwidth == 1:
-            diff = (arr ^ steg) & ((1 << bpc) - 1)
-        else:
-            # view as unsigned for bitwise XOR
-            orig_u = arr.astype(np.uint16)
-            steg_u = steg.astype(np.uint16)
-            diff = (orig_u ^ steg_u) & ((1 << bpc) - 1)
-        changed = np.any(diff != 0, axis=1).mean() * 100.0
+        raise RuntimeError("Unexpected: ran out of space after capacity check passed")
 
-        return {"changed_pct": changed, "out": out_path}
 
     # ---------- extract ----------
     # Read header+payload starting at the same selected area: start_sample

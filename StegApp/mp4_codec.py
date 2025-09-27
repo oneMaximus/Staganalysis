@@ -118,7 +118,14 @@ class Mp4Codec(BaseCodec):
                         # region_flat already modifies 'sub' view -> frame updated
                         writer.write(frame)
                         self._write_remaining_frames(vid, writer)
-                        return {"out": out_path}
+                        return {
+                            "out": out_path,                  # written .mp4
+                            "bytes_embedded": len(obf),       # how many payload bytes appended
+                            "metric_label": "Appended tail",  # human-friendly label
+                            "metric_value": len(obf),         # numeric value for quick display
+                            "appended": len(obf)              # legacy/back-compat if you used this before
+                        }
+
                     writer.write(frame)
         finally:
             writer.release()

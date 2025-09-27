@@ -11,6 +11,7 @@ from typing import Optional
 # UPDATED import to include region helpers
 from mp4_codec import Mp4Codec, preview_region, interactive_select_region
 from analysis_widget import AnalysisWidget
+from stego_manager import embed as stego_embed, extract as stego_extract, capacity as stego_capacity
 
 CODECS = {
     "Image (PNG/BMP/TIFF)": ImageCodec(),
@@ -78,7 +79,7 @@ class PayloadWidget(QtWidgets.QGroupBox):
         if self.tabs.currentIndex() == 0 and self._file_path:
             return self._file_path.name
         txt = self.text_edit.toPlainText()
-        return f"text:{min(20, len(txt))} chars" if txt else "text:empty"
+        return f"text:{len(txt)} chars"
 
     def payload_bytes(self) -> bytes:
         if self.tabs.currentIndex() == 0:
@@ -173,10 +174,12 @@ class VideoPlayer(QtWidgets.QWidget):
         self.player.mediaStatusChanged.connect(self._on_media_status)
 
     def load(self, path: Path):
-        self.stop(); self._path=Path(path)
-        self.video_widget.show(); self.cv_label.hide()
-        self.player.setMedia(QMediaContent(QtCore.QUrl.fromLocalFile(str(path))))
-        self.player.play()
+        # Always use OpenCV fallback to avoid DirectShow errors on Windows
+        self.stop()
+        self._path = Path(path)
+        self.video_widget.hide()
+        self._start_cv_fallback(self._path)
+
 
     def _on_media_status(self, status):
         if status == QMediaPlayer.InvalidMedia and self._path:
@@ -235,7 +238,7 @@ class MainWindow(QtWidgets.QWidget):
         self.box_carrier = DropBox("Carrier")
         self.payload_widget = PayloadWidget("Payload")
         self.box_stego   = DropBox("Stego (for Extract)")
-        self.bpc_spin = QtWidgets.QSpinBox(); self.bpc_spin.setRange(0,7); self.bpc_spin.setValue(1)
+        self.bpc_spin = QtWidgets.QSpinBox(); self.bpc_spin.setRange(1,8); self.bpc_spin.setValue(1)
         self.bpc_spin.setMinimumHeight(30)
 
         self.key_edit = QtWidgets.QLineEdit(); self.key_edit.setPlaceholderText("Key (optional)")
@@ -519,6 +522,7 @@ class MainWindow(QtWidgets.QWidget):
         if not self.carrier or not self.payload_widget.has_payload():
             self.status.setText("Select a carrier and provide a payload (file or text).")
             return
+
         if not self.codec.accepts(self.carrier):
             self.status.setText(f"{self.codec.pretty} expects a different carrier type.")
             return
@@ -526,76 +530,52 @@ class MainWindow(QtWidgets.QWidget):
         bpc = int(self.bpc_spin.value())
         key = self.key_edit.text()
         payload = self.payload_widget.payload_bytes()
-
         if not payload:
             self.status.setText("Payload is empty.")
             return
 
-        region = self._current_region() if isinstance(self.codec, Mp4Codec) else None
-        if region:
-            x,y,w,h = region
-            if w <= 0 or h <= 0:
-                self.status.setText("Region width/height must be > 0.")
-                return
-
         try:
             stem = Path(self.carrier).stem
-            out_path = Path(self.carrier).with_name(f"{stem}__steg")
-            # Pass region if video
-            if isinstance(self.codec, Mp4Codec):
-                result = self.codec.embed(self.carrier, payload, out_path, bpc, key, region=region)
-                self.view_diff.setText("Video embedding complete (region mode)" if region else "Video embedding complete (full frame)")
-                out_file = Path(result["out"])
-            elif isinstance(self.codec, ImageCodec):
-                result = self.codec.embed(self.carrier, payload, out_path, bpc, key)
-                self.view_steg.set_image_from_array(result["steg"])
-                self.view_orig.set_image_from_array(result["orig"])
-                mask_rgb = np.stack([result["mask"]]*3, axis=2)
-                self.view_diff.set_image_from_array(mask_rgb)
-                out_file = Path(result.get("out_path", out_path.with_suffix(".png")))
-            elif isinstance(self.codec, WavCodec):
-                start_sample = int(self.start_sample_spin.value())
-                result = self.codec.embed(self.carrier, payload, out_path, bpc, key, start_sample=start_sample)
-                self.view_diff.setText(f"Modified samples ≈ {result['changed_pct']:.2f}%")
-                out_file = Path(result["out"])
-            else:
-                # others
-                result = self.codec.embed(self.carrier, payload, out_path, bpc, key)
-                self.view_diff.setText(f"Modified samples ≈ {result['changed_pct']:.2f}%")
-                out_file = Path(result["out"])
+            result = stego_embed(self.carrier, payload, f"{stem}__steg", bpc, key)
 
+            # normalize UI bits
+            out_file = Path(result["out"])
             self.last_output_path = out_file
             self.save_output_btn.setEnabled(True)
-            self.status.setText(f"✅ Embedded → {out_file.name}")
+
+            # If images, you still have result["steg"], ["orig"], ["mask"] from ImageCodec
+            if "steg" in result and "orig" in result:
+                self.view_steg.set_image_from_array(result["steg"])
+                self.view_orig.set_image_from_array(result["orig"])
+                if "mask" in result:
+                    mask_rgb = np.stack([result["mask"]] * 3, axis=2)
+                    self.view_diff.set_image_from_array(mask_rgb)
+            else:
+                # generic metric text
+                self.view_diff.setText(f"{result['metric_label']}: {result['metric_value']}")
+
+            # consistent status
+            bytes_emb = int(result.get("bytes_embedded", 0))
+            self.status.setText(f"✅ Embedded {bytes_emb} bytes → {out_file}")
 
         except Exception as e:
             self.status.setText(f"❌ Embed failed: {e}")
+
 
     def on_extract(self):
         if not self.stego:
             self.status.setText("Drop a stego file first."); return
         if not self.codec.accepts(self.stego):
             self.status.setText(f"{self.codec.pretty} expects a different stego file type."); return
+
         bpc = int(self.bpc_spin.value()); key = self.key_edit.text()
-        region = self._current_region() if isinstance(self.codec, Mp4Codec) else None
         try:
-            if isinstance(self.codec, Mp4Codec):
-                data = self.codec.extract(self.stego, bpc, key, region=region)
-            elif isinstance(self.codec, WavCodec):
-                start_sample = int(self.start_sample_spin.value())
-                data = self.codec.extract(self.stego, bpc, key, start_sample=start_sample)
-            else:
-                data = self.codec.extract(self.stego, bpc, key)
+            data = stego_extract(self.stego, bpc, key)
             out = Path(self.stego).with_name(Path(self.stego).stem + "__recovered.bin")
             out.write_bytes(data)
-            self.status.setText(f"✅ Extracted payload → {out.name}")
+            self.status.setText(f"✅ Extracted payload → {out}")
         except Exception as e:
-            msg = str(e)
-            if "Invalid/missing header" in msg and isinstance(self.codec, WavCodec):
-                self.status.setText("❌ Invalid header. Trying other bpc values...")
-                self._attempt_other_bpcs(key)
-            else:
-                self.status.setText(f"❌ Extract failed: {e}")
+            self.status.setText(f"❌ Extract failed: {e}")
 
     def _attempt_other_bpcs(self, key: str):
         if not self.stego or not isinstance(self.codec, WavCodec):
@@ -618,6 +598,20 @@ class MainWindow(QtWidgets.QWidget):
             self.status.setText(f"❌ Multiple possible bpc values ({[b for b,_ in successes]}). Please recall which was used.")
         else:
             self.status.setText("❌ Could not find valid header for any bpc 1..8.")
+
+    def check_capacity(self):
+        if not self.carrier or not self.payload_widget.has_payload():
+            return
+        try:
+            cap = stego_capacity(self.carrier, int(self.bpc_spin.value()))
+            need = len(self.payload_widget.payload_bytes())
+            if need > cap:
+                self.status.setText(f"⚠️ Payload {need} B exceeds capacity {cap} B at {self.bpc_spin.value()} bpc.")
+            else:
+                self.status.setText(f"Capacity OK: need {need} B / have {cap} B.")
+        except Exception as e:
+            self.status.setText(f"Capacity check failed: {e}")
+
 
     def on_save_output_as(self):
         if not self.last_output_path or not Path(self.last_output_path).exists():
