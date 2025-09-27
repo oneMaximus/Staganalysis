@@ -312,12 +312,23 @@ class MainWindow(QtWidgets.QWidget):
         embed_grid.addWidget(self.region_group,1,0,1,3)
         # ------------------------------------------------
 
-        embed_grid.addWidget(self.box_carrier,2,0,1,3)
-        embed_grid.addWidget(self.payload_widget, 3, 0, 1, 3)
-        embed_grid.addWidget(self.box_stego,  4,0,1,3)
-        embed_grid.addWidget(self.embed_btn,  5,0)
-        embed_grid.addWidget(self.extract_btn,5,1)
-        embed_grid.addWidget(self.save_output_btn,5,2)
+        # Side-by-side: Carrier | Payload | Stego
+        embed_grid.addWidget(self.box_carrier, 2, 0)
+        embed_grid.addWidget(self.payload_widget, 2, 1)
+        embed_grid.addWidget(self.box_stego,     2, 2)
+
+        # Make the three columns share space evenly
+        embed_grid.setColumnStretch(0, 1)
+        embed_grid.setColumnStretch(1, 1)
+        embed_grid.setColumnStretch(2, 1)
+
+        # Single-row buttons under the three boxes
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addWidget(self.embed_btn)
+        btn_row.addWidget(self.extract_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.save_output_btn)
+        embed_grid.addLayout(btn_row, 3, 0, 1, 3)
 
         imgs = QtWidgets.QHBoxLayout()
         imgs.addWidget(self.view_orig)
@@ -331,8 +342,8 @@ class MainWindow(QtWidgets.QWidget):
         vh = QtWidgets.QVBoxLayout(video_holder); vh.setContentsMargins(0,0,0,0); vh.addWidget(self.view_video)
         imgs.addWidget(video_holder)
 
-        embed_grid.addLayout(imgs,6,0,1,3)
-        embed_grid.setRowMinimumHeight(6,300)
+        embed_grid.addLayout(imgs, 4, 0, 1, 3)
+        embed_grid.setRowMinimumHeight(4, 300)
 
         self.analysis_tab = AnalysisWidget()
         self.tabs.addTab(self.analysis_tab, "Steg Analysis")
