@@ -1,7 +1,6 @@
-# stego_manager.py
 from __future__ import annotations
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional
 
 from image_codec import ImageCodec
 from wav_codec import WavCodec
@@ -36,17 +35,15 @@ def embed(
     key: str
 ) -> Dict:
     """
-    Returns a normalized dict:
-      {
-        "out": Path,                     # output file path
-        "bytes_embedded": int,           # number of payload bytes that were embedded
-        "metric_label": str,             # short label for UI metric
-        "metric_value": str              # printable metric (e.g., '12.3%', '18342 frames', etc.)
-      }
+    Returns a normalized dict and also passes through codec-specific fields
+    so the UI can display previews/metrics. Canonical keys:
+      - out: Path to output file
+      - bytes_embedded: int
+      - metric_label: short label for UI metric
+      - metric_value: printable metric (e.g., "12.3%", "18342 frames")
+    Any additional keys from the codec (e.g., steg/orig/mask/out_path/changed_pct)
+    are preserved.
     """
-
-
-
     codec = pick_codec_for(carrier)
     if not codec:
         raise ValueError(f"No codec accepts: {carrier}")
@@ -58,34 +55,21 @@ def embed(
     # let the codec do real work
     result = codec.embed(carrier, payload, out_path, bpc, key)
 
-    # normalize
-    out_file = Path(result.get("out", out_path))
-    bytes_embedded = int(result.get("bytes_embedded", 0))
+    # Determine final output file path (codec may return either "out" or "out_path")
+    out_file = Path(result.get("out", result.get("out_path", out_path)))
+    bytes_embedded = len(payload)
 
-    # Prefer codec-provided metric, or map legacy ones
-    if "metric_label" in result and "metric_value" in result:
-        metric_label = str(result["metric_label"])
-        metric_value = str(result["metric_value"])
-    else:
-        # Back-compat: ImageCodec returns steg/orig/mask; WavCodec returns changed_pct; Mp4 used to return appended
-        if "changed_pct" in result:  # WAV
-            metric_label = "Samples changed"
-            metric_value = f"{float(result['changed_pct']):.2f}%"
-        elif "appended" in result:   # older MP4
-            metric_label = "Payload appended"
-            metric_value = f"{int(result['appended'])} bytes"
-            bytes_embedded = max(bytes_embedded, int(result["appended"]))
-        else:
-            metric_label = "Embed status"
-            metric_value = "OK"
-
-    return {
-        "out": out_path,
-        "bytes_embedded": len(payload),
+    # Base normalized fields
+    ret = {
+        "out": out_file,
+        "bytes_embedded": bytes_embedded,
         "metric_label": "Payload size",
-        "metric_value": f"{len(payload)} bytes"
+        "metric_value": f"{bytes_embedded} bytes",
     }
 
+    # Preserve codec-specific fields so UI can use them (image previews, masks, etc.)
+    ret.update(result)
+    return ret
 
 def extract(stego: Path, bpc: int, key: str) -> bytes:
     codec = pick_codec_for(stego)
