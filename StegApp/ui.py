@@ -262,6 +262,29 @@ class MainWindow(QtWidgets.QWidget):
         form.addRow("Key:", self.key_edit)
         embed_grid.addLayout(form, 0,0,1,3)
 
+        # ---------- NEW REGION UI (Audio Only) ----------
+        self.audio_region_group = QtWidgets.QGroupBox("Audio Region (LSB area)")
+        ag_lay = QtWidgets.QGridLayout(self.audio_region_group)
+
+        self.audio_region_enable_chk = QtWidgets.QCheckBox("Enable audio start (WAV only)")
+        self.audio_region_enable_chk.setChecked(True)
+        ag_lay.addWidget(self.audio_region_enable_chk, 0, 0, 1, 3)
+
+        ag_lay.addWidget(QtWidgets.QLabel("Start Sample:"), 1, 0)
+        # Create the audio start-sample control locally (no need to add it anywhere else)
+        self.start_sample_spin = QtWidgets.QSpinBox()
+        self.start_sample_spin.setRange(0, 1_000_000_000)
+        self.start_sample_spin.setValue(0)
+        self.start_sample_spin.setToolTip("WAV only: frame index to start embedding/extracting (header+payload).")
+        
+        ag_lay.addWidget(self.start_sample_spin, 1, 1)
+
+        self.audio_region_enable_chk.toggled.connect(self.start_sample_spin.setEnabled)
+
+        self.audio_region_group.hide()
+        embed_grid.addWidget(self.audio_region_group, 1, 0, 1, 3)
+        # ------------------------------------------------
+
         # ---------- NEW REGION UI (Video Only) ----------
         self.region_group = QtWidgets.QGroupBox("Video Region (LSB area)")
         rg_lay = QtWidgets.QGridLayout(self.region_group)
@@ -399,12 +422,31 @@ class MainWindow(QtWidgets.QWidget):
     def on_codec_change(self, txt: str):
         self.codec_name = txt
         self.codec = CODECS[txt]
+
+        # Show/hide region controls appropriately
         if isinstance(self.codec, ImageCodec):
+            # Hide both region groups and the audio start spin for images
+            self.region_group.hide()
+            self.audio_region_group.hide()
+            self.start_sample_spin.hide()
             self.view_video.hide()
             self.view_orig.show(); self.view_steg.show(); self.view_diff.show()
+
+        elif isinstance(self.codec, WavCodec):
+            # Show audio region (Start Sample), hide video region
+            self.audio_region_group.show()
+            self.region_group.hide()
+            self.start_sample_spin.show()
+            self.view_video.hide()
+            self.view_orig.show(); self.view_steg.show(); self.view_diff.show()
+
         elif isinstance(self.codec, Mp4Codec):
-            # Nothing special here—region group only meaningful for video
-            pass
+            # Show video region, hide audio region (start sample)
+            self.region_group.show()
+            self.audio_region_group.hide()
+            self.start_sample_spin.hide()
+            # Video preview handled later when carrier is loaded
+
         self.status.setText(f"Carrier type set to: {txt}")
         self._update_region_boxes_enabled()
 
@@ -500,8 +542,13 @@ class MainWindow(QtWidgets.QWidget):
                 mask_rgb = np.stack([result["mask"]]*3, axis=2)
                 self.view_diff.set_image_from_array(mask_rgb)
                 out_file = Path(result.get("out_path", out_path.with_suffix(".png")))
+            elif isinstance(self.codec, WavCodec):
+                start_sample = int(self.start_sample_spin.value())
+                result = self.codec.embed(self.carrier, payload, out_path, bpc, key, start_sample=start_sample)
+                self.view_diff.setText(f"Modified samples ≈ {result['changed_pct']:.2f}%")
+                out_file = Path(result["out"])
             else:
-                # WAV or others
+                # others
                 result = self.codec.embed(self.carrier, payload, out_path, bpc, key)
                 self.view_diff.setText(f"Modified samples ≈ {result['changed_pct']:.2f}%")
                 out_file = Path(result["out"])
@@ -523,6 +570,9 @@ class MainWindow(QtWidgets.QWidget):
         try:
             if isinstance(self.codec, Mp4Codec):
                 data = self.codec.extract(self.stego, bpc, key, region=region)
+            elif isinstance(self.codec, WavCodec):
+                start_sample = int(self.start_sample_spin.value())
+                data = self.codec.extract(self.stego, bpc, key, start_sample=start_sample)
             else:
                 data = self.codec.extract(self.stego, bpc, key)
             out = Path(self.stego).with_name(Path(self.stego).stem + "__recovered.bin")
@@ -542,7 +592,8 @@ class MainWindow(QtWidgets.QWidget):
         successes = []
         for test_bpc in range(1,9):
             try:
-                data = self.codec.extract(self.stego, test_bpc, key)
+                start_sample = int(self.start_sample_spin.value())
+                data = self.codec.extract(self.stego, test_bpc, key, start_sample=start_sample)
                 successes.append((test_bpc, data))
             except Exception:
                 continue

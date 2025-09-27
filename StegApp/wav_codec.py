@@ -66,26 +66,37 @@ class WavCodec(BaseCodec):
         return u
 
     # ---------- embed ----------
-    def embed(self, carrier: Path, payload: bytes, out_path: Path, bpc: int, key: str) -> dict:
+    # Start header+payload at the beginning of the selected area: start_sample
+    def embed(self, carrier: Path, payload: bytes, out_path: Path, bpc: int, key: str, start_sample: int = 0) -> dict:
         arr, meta = self._read_wav(carrier)
         frames, chans = arr.shape
         sampwidth = meta["sampwidth"]  # 1 or 2 bytes
 
         if bpc < 1 or bpc > 8:
             raise ValueError("bpc must be between 1 and 8 for PCM WAV")
+        if start_sample < 0 or start_sample >= frames:
+            raise ValueError(f"start_sample {start_sample} out of range (0..{frames-1})")
 
         obf = xor_bytes(payload, key)
-        total = build_header(obf, 0) + obf
+        total = build_header(obf, 0) + obf  # header + payload like video
 
-        cap = (frames * chans * bpc) // 8
-        if len(total) > cap:
-            raise ValueError(f"Capacity too small: need {len(total)} B, have ~{cap} B at {bpc} bpc, {chans} ch")
+        # Capacity only from start_sample to end (selected area)
+        avail_bits = (frames - start_sample) * chans * bpc
+        need_bits = (HEADER_LEN + len(obf)) * 8
+        if need_bits > avail_bits:
+            need_bytes = HEADER_LEN + len(obf)
+            avail_bytes = avail_bits // 8
+            raise ValueError(
+                f"Capacity too small from start_sample={start_sample}: "
+                f"need {need_bytes} B, have ~{avail_bytes} B at {bpc} bpc, {chans} ch"
+            )
 
         flat = arr.copy().reshape(-1)
         bits = bits_from_bytes(total)
+        start_idx = start_sample * chans
 
         try:
-            for i in range(flat.size):
+            for i in range(start_idx, flat.size):
                 if sampwidth == 1:
                     # unsigned byte
                     v = int(flat[i])            # 0..255
@@ -97,13 +108,10 @@ class WavCodec(BaseCodec):
                     u = v_signed & 0xFFFF       # 0..65535
                     u = self._modify_lsb_unsigned(u, bpc, bits)
                     # Convert back to signed range
-                    if u >= 0x8000:
-                        v_new = u - 0x10000     # two's complement -> negative
-                    else:
-                        v_new = u
+                    v_new = u - 0x10000 if u >= 0x8000 else u
                     flat[i] = np.int16(v_new)
         except StopIteration:
-            # Finished embedding earlier than filling all samples
+            # Finished embedding earlier than filling all selected samples
             pass
 
         steg = flat.reshape(frames, chans)
@@ -123,17 +131,21 @@ class WavCodec(BaseCodec):
         return {"changed_pct": changed, "out": out_path}
 
     # ---------- extract ----------
-    def extract(self, stego: Path, bpc: int, key: str) -> bytes:
+    # Read header+payload starting at the same selected area: start_sample
+    def extract(self, stego: Path, bpc: int, key: str, start_sample: int = 0) -> bytes:
         arr, meta = self._read_wav(stego)
         frames, chans = arr.shape
         sampwidth = meta["sampwidth"]
 
         if bpc < 1 or bpc > 8:
             raise ValueError("bpc must be between 1 and 8 for PCM WAV")
+        if start_sample < 0 or start_sample >= frames:
+            raise ValueError(f"start_sample {start_sample} out of range (0..{frames-1})")
 
         def reader() -> Iterator[int]:
             flat = arr.reshape(-1)
-            for i in range(flat.size):
+            start_idx = start_sample * chans
+            for i in range(start_idx, flat.size):
                 if sampwidth == 1:
                     v = int(flat[i])  # 0..255
                     for k in range(bpc):
