@@ -12,6 +12,7 @@ from typing import Optional
 from mp4_codec import Mp4Codec, preview_region, interactive_select_region
 from analysis_widget import AnalysisWidget
 from stego_manager import embed as stego_embed, extract as stego_extract, capacity as stego_capacity
+from wav_analysis_widget import WavAnalysisWidget   # NEW: WAV analysis tab
 
 CODECS = {
     "Image (PNG/BMP/TIFF)": ImageCodec(),
@@ -180,7 +181,6 @@ class VideoPlayer(QtWidgets.QWidget):
         self.video_widget.hide()
         self._start_cv_fallback(self._path)
 
-
     def _on_media_status(self, status):
         if status == QMediaPlayer.InvalidMedia and self._path:
             self._switch_to_cv()
@@ -274,12 +274,11 @@ class MainWindow(QtWidgets.QWidget):
         ag_lay.addWidget(self.audio_region_enable_chk, 0, 0, 1, 3)
 
         ag_lay.addWidget(QtWidgets.QLabel("Start Sample:"), 1, 0)
-        # Create the audio start-sample control locally (no need to add it anywhere else)
         self.start_sample_spin = QtWidgets.QSpinBox()
         self.start_sample_spin.setRange(0, 1_000_000_000)
         self.start_sample_spin.setValue(0)
         self.start_sample_spin.setToolTip("WAV only: frame index to start embedding/extracting (header+payload).")
-        
+
         ag_lay.addWidget(self.start_sample_spin, 1, 1)
 
         self.audio_region_enable_chk.toggled.connect(self.start_sample_spin.setEnabled)
@@ -320,12 +319,10 @@ class MainWindow(QtWidgets.QWidget):
         embed_grid.addWidget(self.payload_widget, 2, 1)
         embed_grid.addWidget(self.box_stego,     2, 2)
 
-        # Make the three columns share space evenly
         embed_grid.setColumnStretch(0, 1)
         embed_grid.setColumnStretch(1, 1)
         embed_grid.setColumnStretch(2, 1)
 
-        # Single-row buttons under the three boxes
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addWidget(self.embed_btn)
         btn_row.addWidget(self.extract_btn)
@@ -351,6 +348,10 @@ class MainWindow(QtWidgets.QWidget):
         self.analysis_tab = AnalysisWidget()
         self.tabs.addTab(self.analysis_tab, "Steg Analysis")
 
+        # NEW: Dedicated WAV analysis / forensic tab
+        self.wav_analysis_tab = WavAnalysisWidget()
+        self.tabs.addTab(self.wav_analysis_tab, "WAV Analysis")
+
         outer = QtWidgets.QVBoxLayout(self)
         outer.addWidget(self.tabs)
         outer.addWidget(self.status)
@@ -371,7 +372,6 @@ class MainWindow(QtWidgets.QWidget):
         self.region_preview_btn.clicked.connect(self._preview_region)
         self.region_pick_btn.clicked.connect(self._apply_interactive_region)
 
-        # Initial state
         self._update_region_boxes_enabled()
         self.on_codec_change(self.codec_combo.currentText())
 
@@ -422,10 +422,8 @@ class MainWindow(QtWidgets.QWidget):
             return
         x,y,w,h = reg
         try:
-            # Save a temporary preview image beside the video
             tmp = Path(self.carrier).with_name(Path(self.carrier).stem + "__region_preview.png")
             preview_region(self.carrier, x,y,w,h, frame_index=0, window=False, save_path=tmp)
-            # Show inside diff view
             im = Image.open(tmp).convert("RGB")
             self.view_diff.set_image_from_array(np.array(im))
             self.status.setText(f"Region preview saved: {tmp.name}")
@@ -437,9 +435,7 @@ class MainWindow(QtWidgets.QWidget):
         self.codec_name = txt
         self.codec = CODECS[txt]
 
-        # Show/hide region controls appropriately
         if isinstance(self.codec, ImageCodec):
-            # Hide both region groups and the audio start spin for images
             self.region_group.hide()
             self.audio_region_group.hide()
             self.start_sample_spin.hide()
@@ -447,7 +443,6 @@ class MainWindow(QtWidgets.QWidget):
             self.view_orig.show(); self.view_steg.show(); self.view_diff.show()
 
         elif isinstance(self.codec, WavCodec):
-            # Show audio region (Start Sample), hide video region
             self.audio_region_group.show()
             self.region_group.hide()
             self.start_sample_spin.show()
@@ -455,11 +450,9 @@ class MainWindow(QtWidgets.QWidget):
             self.view_orig.show(); self.view_steg.show(); self.view_diff.show()
 
         elif isinstance(self.codec, Mp4Codec):
-            # Show video region, hide audio region (start sample)
             self.region_group.show()
             self.audio_region_group.hide()
             self.start_sample_spin.hide()
-            # Video preview handled later when carrier is loaded
 
         self.status.setText(f"Carrier type set to: {txt}")
         self._update_region_boxes_enabled()
@@ -484,7 +477,6 @@ class MainWindow(QtWidgets.QWidget):
                 self.view_orig.hide()
                 self.view_steg.show(); self.view_diff.show(); self.view_video.show()
                 self.view_video.load(p)
-                # Update spin box limits based on video frame
                 cap = cv2.VideoCapture(str(p))
                 ok, frame = cap.read()
                 cap.release()
@@ -534,16 +526,22 @@ class MainWindow(QtWidgets.QWidget):
             self.status.setText("Payload is empty.")
             return
 
-        try:
-            stem = Path(self.carrier).stem
-            result = stego_embed(self.carrier, payload, f"{stem}__steg", bpc, key)
+        stem = Path(self.carrier).stem
 
-            # normalize UI bits
+        try:
+            if isinstance(self.codec, WavCodec):
+                # WAV: respect start sample offset
+                start_sample = self.start_sample_spin.value() if self.audio_region_enable_chk.isChecked() else 0
+                out_base = Path(self.carrier).with_name(f"{stem}__steg")
+                result = self.codec.embed(self.carrier, payload, out_base, bpc, key, start_sample=start_sample)
+            else:
+                # Generic path via stego_manager
+                result = stego_embed(self.carrier, payload, f"{stem}__steg", bpc, key)
+
             out_file = Path(result["out"])
             self.last_output_path = out_file
             self.save_output_btn.setEnabled(True)
 
-            # If images, you still have result["steg"], ["orig"], ["mask"] from ImageCodec
             if "steg" in result and "orig" in result:
                 self.view_steg.set_image_from_array(result["steg"])
                 self.view_orig.set_image_from_array(result["orig"])
@@ -551,16 +549,13 @@ class MainWindow(QtWidgets.QWidget):
                     mask_rgb = np.stack([result["mask"]] * 3, axis=2)
                     self.view_diff.set_image_from_array(mask_rgb)
             else:
-                # generic metric text
                 self.view_diff.setText(f"{result['metric_label']}: {result['metric_value']}")
 
-            # consistent status
             bytes_emb = int(result.get("bytes_embedded", 0))
             self.status.setText(f"✅ Embedded {bytes_emb} bytes → {out_file}")
 
         except Exception as e:
             self.status.setText(f"❌ Embed failed: {e}")
-
 
     def on_extract(self):
         if not self.stego:
@@ -570,7 +565,12 @@ class MainWindow(QtWidgets.QWidget):
 
         bpc = int(self.bpc_spin.value()); key = self.key_edit.text()
         try:
-            data = stego_extract(self.stego, bpc, key)
+            if isinstance(self.codec, WavCodec):
+                start_sample = self.start_sample_spin.value() if self.audio_region_enable_chk.isChecked() else 0
+                data = self.codec.extract(self.stego, bpc, key, start_sample=start_sample)
+            else:
+                data = stego_extract(self.stego, bpc, key)
+
             out = Path(self.stego).with_name(Path(self.stego).stem + "__recovered.bin")
             out.write_bytes(data)
             self.status.setText(f"✅ Extracted payload → {out}")
@@ -603,15 +603,19 @@ class MainWindow(QtWidgets.QWidget):
         if not self.carrier or not self.payload_widget.has_payload():
             return
         try:
-            cap = stego_capacity(self.carrier, int(self.bpc_spin.value()))
+            bpc = int(self.bpc_spin.value())
             need = len(self.payload_widget.payload_bytes())
+            if isinstance(self.codec, WavCodec):
+                start_sample = self.start_sample_spin.value() if self.audio_region_enable_chk.isChecked() else 0
+                cap = self.codec.capacity_bytes(self.carrier, bpc, start_sample=start_sample)
+            else:
+                cap = stego_capacity(self.carrier, bpc)
             if need > cap:
-                self.status.setText(f"⚠️ Payload {need} B exceeds capacity {cap} B at {self.bpc_spin.value()} bpc.")
+                self.status.setText(f"⚠️ Payload {need} B exceeds capacity {cap} B at {bpc} bpc.")
             else:
                 self.status.setText(f"Capacity OK: need {need} B / have {cap} B.")
         except Exception as e:
             self.status.setText(f"Capacity check failed: {e}")
-
 
     def on_save_output_as(self):
         if not self.last_output_path or not Path(self.last_output_path).exists():
