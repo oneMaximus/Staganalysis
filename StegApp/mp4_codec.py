@@ -14,7 +14,7 @@ class Mp4Codec(BaseCodec):
     pretty   = "Video (MP4 H.264)"
 
     def accepts(self, path: Path) -> bool:
-        return path.suffix.lower() == ".mp4"
+        return path.suffix.lower() in {".mp4", ".avi"}
 
     # NEW: region optional
     def capacity_bytes(self, carrier: Path, bpc: int, region=None) -> int:
@@ -78,12 +78,16 @@ class Mp4Codec(BaseCodec):
         if not vid.isOpened():
             raise ValueError("Could not open carrier video")
 
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        fps = vid.get(cv2.CAP_PROP_FPS)
-        W = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
-        H = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        out_path = out_path.with_suffix(".mp4")
-        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (W, H))
+        fps = vid.get(cv2.CAP_PROP_FPS) or 30.0
+        W = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH)); H = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        out_lossless = out_path.with_suffix(".avi")
+        fourcc = cv2.VideoWriter_fourcc(*'FFV1')
+        writer = cv2.VideoWriter(str(out_lossless), fourcc, fps, (W, H))
+        if not writer.isOpened():
+            # fallback (lossy — may break extraction)
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out_lossless = out_path.with_suffix(".mp4")
+            writer = cv2.VideoWriter(str(out_lossless), fourcc, fps, (W, H))
 
         # Validate region if provided
         if region is not None:
@@ -106,7 +110,7 @@ class Mp4Codec(BaseCodec):
                         frame_out = flat.reshape(H, W, 3)
                         writer.write(frame_out)
                         self._write_remaining_frames(vid, writer)
-                        return {"out": out_path}
+                        return {"out": out_lossless}
                     frame_out = flat.reshape(H, W, 3)
                     writer.write(frame_out)
                 else:
@@ -119,11 +123,11 @@ class Mp4Codec(BaseCodec):
                         writer.write(frame)
                         self._write_remaining_frames(vid, writer)
                         return {
-                            "out": out_path,                  # written .mp4
-                            "bytes_embedded": len(obf),       # how many payload bytes appended
-                            "metric_label": "Appended tail",  # human-friendly label
-                            "metric_value": len(obf),         # numeric value for quick display
-                            "appended": len(obf)              # legacy/back-compat if you used this before
+                            "out": out_lossless,
+                            "bytes_embedded": len(obf),
+                            "metric_label": "Appended tail",
+                            "metric_value": len(obf),
+                            "appended": len(obf)
                         }
 
                     writer.write(frame)

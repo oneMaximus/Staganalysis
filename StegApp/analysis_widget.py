@@ -81,15 +81,17 @@ class AnalysisWidget(QtWidgets.QWidget):
 
         # --- small drop/filename strip ---
         self.file_lbl = QtWidgets.QLabel("Drop an image or video (mp4/mov/m4v) here")
+        self.file_lbl.setObjectName("dropBanner")
         self.file_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        self.file_lbl.setFrameShape(QtWidgets.QFrame.Box)
-        self.file_lbl.setMinimumHeight(36)           # smaller
-        self.file_lbl.setMaximumHeight(42)
+        self.file_lbl.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.file_lbl.setMinimumHeight(44)
+        self.file_lbl.setMaximumHeight(60)
 
         # controls
         self.channel = QtWidgets.QComboBox()
         self.channel.addItems(["Red", "Green", "Blue"])
         self.bit_spin = QtWidgets.QSpinBox(); self.bit_spin.setRange(1, 8); self.bit_spin.setValue(1)
+        self.bit_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.UpDownArrows)
         self.bit_spin.setMinimumHeight(30)
 
         ctrl = QtWidgets.QHBoxLayout()
