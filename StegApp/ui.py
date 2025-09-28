@@ -617,28 +617,22 @@ class MainWindow(QtWidgets.QWidget):
         embed_grid.addWidget(self.payload_widget, 2, 1)
         embed_grid.addWidget(self.box_stego,     2, 2)
 
-<<<<<<< Updated upstream
-=======
         #Seb Clear Feature
         embed_grid.addWidget(self.clear_carrier_btn, 3, 0)
         embed_grid.addWidget(self.clear_payload_btn, 3, 1)
         embed_grid.addWidget(self.clear_stego_btn,   3, 2)
 
         # Make the three columns share space evenly
->>>>>>> Stashed changes
         embed_grid.setColumnStretch(0, 1)
         embed_grid.setColumnStretch(1, 1)
         embed_grid.setColumnStretch(2, 1)
 
-<<<<<<< Updated upstream
-=======
         imgs = QtWidgets.QHBoxLayout()
         imgs.addWidget(self.view_orig)
         imgs.addWidget(self.view_steg)
         imgs.addWidget(self.view_diff)
 
         # Single-row buttons under the three boxes
->>>>>>> Stashed changes
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addWidget(self.embed_btn)
         btn_row.addWidget(self.extract_btn)
@@ -646,7 +640,6 @@ class MainWindow(QtWidgets.QWidget):
         btn_row.addWidget(self.save_output_btn)
         embed_grid.addLayout(btn_row, 4, 0, 1, 3)
 
-<<<<<<< Updated upstream
         # Previews row — three matching cards; left card shows Image OR Video OR Audio
         self.preview_stack = QtWidgets.QStackedWidget()
         self.preview_stack.addWidget(self.view_orig)     # index 0 = image
@@ -658,7 +651,6 @@ class MainWindow(QtWidgets.QWidget):
         imgs.addWidget(self.preview_stack)
         imgs.addWidget(self.view_steg)
         imgs.addWidget(self.view_diff)
-=======
 
         self.view_video.hide()
         video_holder = QtWidgets.QFrame()
@@ -667,7 +659,6 @@ class MainWindow(QtWidgets.QWidget):
         vh = QtWidgets.QVBoxLayout(video_holder); vh.setContentsMargins(0,0,0,0); vh.addWidget(self.view_video)
         imgs.addWidget(video_holder)
 
->>>>>>> Stashed changes
         embed_grid.addLayout(imgs, 4, 0, 1, 3)
 
         self.analysis_tab = AnalysisWidget()
