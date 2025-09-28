@@ -514,6 +514,12 @@ class MainWindow(QtWidgets.QWidget):
         self.box_carrier = DropBox("Carrier")
         self.payload_widget = PayloadWidget("Payload")
         self.box_stego   = DropBox("Stego (for Extract)")
+
+        #Seb Clear Feature (QPushButton)
+        self.clear_carrier_btn = QtWidgets.QPushButton("Clear Carrier")
+        self.clear_payload_btn = QtWidgets.QPushButton("Clear Payload")
+        self.clear_stego_btn   = QtWidgets.QPushButton("Clear Stego")
+
         self.bpc_spin = QtWidgets.QSpinBox(); self.bpc_spin.setRange(1,8); self.bpc_spin.setValue(1)
         self.bpc_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.UpDownArrows)
         self.bpc_spin.setMinimumHeight(30)
@@ -611,17 +617,36 @@ class MainWindow(QtWidgets.QWidget):
         embed_grid.addWidget(self.payload_widget, 2, 1)
         embed_grid.addWidget(self.box_stego,     2, 2)
 
+<<<<<<< Updated upstream
+=======
+        #Seb Clear Feature
+        embed_grid.addWidget(self.clear_carrier_btn, 3, 0)
+        embed_grid.addWidget(self.clear_payload_btn, 3, 1)
+        embed_grid.addWidget(self.clear_stego_btn,   3, 2)
+
+        # Make the three columns share space evenly
+>>>>>>> Stashed changes
         embed_grid.setColumnStretch(0, 1)
         embed_grid.setColumnStretch(1, 1)
         embed_grid.setColumnStretch(2, 1)
 
+<<<<<<< Updated upstream
+=======
+        imgs = QtWidgets.QHBoxLayout()
+        imgs.addWidget(self.view_orig)
+        imgs.addWidget(self.view_steg)
+        imgs.addWidget(self.view_diff)
+
+        # Single-row buttons under the three boxes
+>>>>>>> Stashed changes
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addWidget(self.embed_btn)
         btn_row.addWidget(self.extract_btn)
         btn_row.addStretch(1)
         btn_row.addWidget(self.save_output_btn)
-        embed_grid.addLayout(btn_row, 3, 0, 1, 3)
+        embed_grid.addLayout(btn_row, 4, 0, 1, 3)
 
+<<<<<<< Updated upstream
         # Previews row — three matching cards; left card shows Image OR Video OR Audio
         self.preview_stack = QtWidgets.QStackedWidget()
         self.preview_stack.addWidget(self.view_orig)     # index 0 = image
@@ -633,6 +658,16 @@ class MainWindow(QtWidgets.QWidget):
         imgs.addWidget(self.preview_stack)
         imgs.addWidget(self.view_steg)
         imgs.addWidget(self.view_diff)
+=======
+
+        self.view_video.hide()
+        video_holder = QtWidgets.QFrame()
+        video_holder.setFrameShape(QtWidgets.QFrame.NoFrame)
+        video_holder.setMinimumHeight(300); video_holder.setMaximumHeight(300)
+        vh = QtWidgets.QVBoxLayout(video_holder); vh.setContentsMargins(0,0,0,0); vh.addWidget(self.view_video)
+        imgs.addWidget(video_holder)
+
+>>>>>>> Stashed changes
         embed_grid.addLayout(imgs, 4, 0, 1, 3)
 
         self.analysis_tab = AnalysisWidget()
@@ -667,6 +702,27 @@ class MainWindow(QtWidgets.QWidget):
         # Initial state
         self._update_region_boxes_enabled()
         self.on_codec_change(self.codec_combo.currentText())
+
+        #Seb Clear Button
+        self.clear_carrier_btn.clicked.connect(lambda: self.clear_box("carrier"))
+        self.clear_payload_btn.clicked.connect(lambda: self.clear_box("payload"))
+        self.clear_stego_btn.clicked.connect(lambda: self.clear_box("stego"))
+
+    def clear_box(self, which: str):
+        if which == "carrier":
+            self.carrier = None
+            self.box_carrier.label.setText("Drop a file here")
+            self.view_orig.clear()
+        elif which == "payload":
+            self.payload = None
+            self.payload_widget.drop.label.setText("Drop a file here")
+            self.payload_widget.text_edit.clear()
+        elif which == "stego":
+            self.stego = None
+            self.box_stego.label.setText("Drop a file here")
+            self.view_steg.clear()
+            self.view_diff.clear()
+        self.status.setText(f"Cleared {which}.")
 
     # ---------------- Region Helpers ----------------
     def _update_region_boxes_enabled(self):
