@@ -1,8 +1,7 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
-import numpy as np
-import cv2
+from PyQt5.QtCore import QRunnable, QThreadPool, pyqtSignal, QObject
 from pathlib import Path
 from image_codec import ImageCodec
 from wav_codec import WavCodec
@@ -13,6 +12,9 @@ from mp4_codec import Mp4Codec, preview_region, interactive_select_region
 from analysis_widget import AnalysisWidget
 from stego_manager import embed as stego_embed, extract as stego_extract, capacity as stego_capacity
 from wav_analysis_widget import WavAnalysisWidget   # NEW: WAV analysis tab
+import traceback
+import numpy as np
+import cv2
 
 
 CODECS = {
@@ -88,6 +90,26 @@ class ArrowStyle(QtWidgets.QProxyStyle):
         if sp == QtWidgets.QStyle.SP_ComboBoxArrow:
             return self._down
         return super().standardPixmap(sp, opt, widget)
+    
+class WorkerSignals(QObject):
+    finished = pyqtSignal(object)   # result
+    error = pyqtSignal(tuple)       # (exctype, value, traceback)
+
+class Worker(QRunnable):
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = self.fn(*self.args, **self.kwargs)
+            self.signals.finished.emit(result)
+        except Exception as e:
+            traceback.print_exc()
+            self.signals.error.emit((type(e), e, traceback.format_exc()))
 
 class PayloadWidget(QtWidgets.QGroupBox):
     changed = QtCore.pyqtSignal()
@@ -146,16 +168,26 @@ class PayloadWidget(QtWidgets.QGroupBox):
         return f"text:{len(txt)} chars"
 
     def payload_bytes(self) -> bytes:
-        if self.tabs.currentIndex() == 0:
+        if self.tabs.currentIndex() == 0:  # File tab
             if not self._file_path:
                 return b""
-            return Path(self._file_path).read_bytes()
-        enc = self.encoding.currentText()
-        return self.text_edit.toPlainText().encode(enc, errors="replace")
+            try:
+                return Path(self._file_path).read_bytes()
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self, "Error", f"Failed to read payload file:\n{e}"
+                )
+                return b""
+        else:  # Text tab
+            enc = self.encoding.currentText()
+            return self.text_edit.toPlainText().encode(enc, errors="replace")
+
+
 
     def _on_file(self, p: Path):
         self._file_path = p
         self.changed.emit()
+
 
 
 class DropBox(QtWidgets.QGroupBox):
@@ -165,18 +197,48 @@ class DropBox(QtWidgets.QGroupBox):
         self.setObjectName("dropZone")
         self.setProperty("dragOver", False)
         self.setAcceptDrops(True)
-        self.label = QtWidgets.QLabel("Drop a file here", alignment=QtCore.Qt.AlignCenter)
-        self.label.setWordWrap(True)
+        
+
+         # Central layout
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(12, 30, 12, 14)
         lay.setSpacing(8)
-        lay.addWidget(self.label)
+
+        # Horizontal row: label + inline Browse button
+        row = QtWidgets.QHBoxLayout()
+        row.setAlignment(QtCore.Qt.AlignCenter)   # keep row centered
+
+        self.label = QtWidgets.QLabel("Drop a file here or")
+        self.label.setAlignment(QtCore.Qt.AlignVCenter)
+
+        self.browse_btn = QtWidgets.QPushButton("Browse")
+        self.browse_btn.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self.browse_btn.setObjectName("browseBtnInline")
+        self.browse_btn.clicked.connect(self._open_file_dialog)
+
+        row.addWidget(self.label)
+        row.addWidget(self.browse_btn)
+
+
+        lay.addStretch(1)
+        lay.addLayout(row)
+        lay.addStretch(1)
+
         self.setMinimumHeight(120)
+
+    def _open_file_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select File")
+        if path:
+            p = Path(path)
+            self.label.setText(f"Selected: {p.name}")
+            self.fileDropped.emit(p)
+            
     def dragEnterEvent(self, e: QtGui.QDragEnterEvent):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
             self.setProperty("dragOver", True)
             self.style().unpolish(self); self.style().polish(self)
+
     def dropEvent(self, e: QtGui.QDropEvent):
         urls = e.mimeData().urls()
         if not urls:
@@ -188,6 +250,7 @@ class DropBox(QtWidgets.QGroupBox):
         self.fileDropped.emit(p)
         self.setProperty("dragOver", False)
         self.style().unpolish(self); self.style().polish(self)
+
     def dragLeaveEvent(self, e: QtGui.QDragLeaveEvent):
         self.setProperty("dragOver", False)
         self.style().unpolish(self); self.style().polish(self)
@@ -494,6 +557,7 @@ class AudioPlayer(QtWidgets.QWidget):
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
+        self.threadpool = QThreadPool()
         self.setWindowTitle("Steg Lab — Image, WAV, MP4 LSB")
         self.codec_name = "Image (PNG/BMP/TIFF)"
         self.codec = CODECS[self.codec_name]
@@ -519,6 +583,7 @@ class MainWindow(QtWidgets.QWidget):
         self.clear_carrier_btn = QtWidgets.QPushButton("Clear Carrier")
         self.clear_payload_btn = QtWidgets.QPushButton("Clear Payload")
         self.clear_stego_btn   = QtWidgets.QPushButton("Clear Stego")
+        
 
         self.bpc_spin = QtWidgets.QSpinBox(); self.bpc_spin.setRange(1,8); self.bpc_spin.setValue(1)
         self.bpc_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.UpDownArrows)
@@ -529,7 +594,7 @@ class MainWindow(QtWidgets.QWidget):
         self.extract_btn = QtWidgets.QPushButton("Extract ⏏")
         self.status = QtWidgets.QLabel("Ready."); self.status.setWordWrap(True)
         self.status.setObjectName("status")
-
+        
 
         self.view_orig = ImageView("Original")
         self.view_steg = ImageView("Embedded")
@@ -550,6 +615,15 @@ class MainWindow(QtWidgets.QWidget):
         self.tabs.tabBar().setExpanding(False)
         self.tabs.tabBar().setUsesScrollButtons(True)
         embed_grid.setVerticalSpacing(12)
+        self.embed_btn.setProperty("secondary", False)
+        self.embed_btn.setProperty("tertiary", False)
+
+        self.extract_btn.setProperty("secondary", True)
+        self.extract_btn.setProperty("tertiary", False)
+
+        self.save_output_btn.setProperty("secondary", False)
+        self.save_output_btn.setProperty("tertiary", True)
+
 
         form = QtWidgets.QFormLayout()
         form.addRow("Carrier Type:", self.codec_combo)
@@ -622,44 +696,43 @@ class MainWindow(QtWidgets.QWidget):
         embed_grid.addWidget(self.clear_payload_btn, 3, 1)
         embed_grid.addWidget(self.clear_stego_btn,   3, 2)
 
-        # Make the three columns share space evenly
+                # Make the three columns share space evenly
         embed_grid.setColumnStretch(0, 1)
         embed_grid.setColumnStretch(1, 1)
         embed_grid.setColumnStretch(2, 1)
 
-        imgs = QtWidgets.QHBoxLayout()
-        imgs.addWidget(self.view_orig)
-        imgs.addWidget(self.view_steg)
-        imgs.addWidget(self.view_diff)
+        # --- Actions row (Embed / Extract / Save) ---
+        actions_row = QtWidgets.QHBoxLayout()
+        actions_row.addStretch(1)
+        actions_row.addWidget(self.embed_btn)
+        actions_row.addSpacing(12)
+        actions_row.addWidget(self.extract_btn)
+        actions_row.addSpacing(12)
+        actions_row.addWidget(self.save_output_btn)
+        actions_row.addStretch(1)
+        embed_grid.addLayout(actions_row, 4, 0, 1, 3)
 
-        # Single-row buttons under the three boxes
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addWidget(self.embed_btn)
-        btn_row.addWidget(self.extract_btn)
-        btn_row.addStretch(1)
-        btn_row.addWidget(self.save_output_btn)
-        embed_grid.addLayout(btn_row, 4, 0, 1, 3)
-
-        # Previews row — three matching cards; left card shows Image OR Video OR Audio
+        # --- Previews row (Original | Stego | Diff) ---
         self.preview_stack = QtWidgets.QStackedWidget()
         self.preview_stack.addWidget(self.view_orig)     # index 0 = image
         self.preview_stack.addWidget(self.view_video)    # index 1 = video
         self.preview_stack.addWidget(self.audio_player)  # index 2 = audio
         self.preview_stack.setCurrentIndex(0)
 
-        imgs = QtWidgets.QHBoxLayout()
-        imgs.addWidget(self.preview_stack)
-        imgs.addWidget(self.view_steg)
-        imgs.addWidget(self.view_diff)
+        # Allow previews to expand more naturally
+        self.view_orig.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.view_steg.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.view_diff.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.view_video.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.audio_player.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
-        self.view_video.hide()
-        video_holder = QtWidgets.QFrame()
-        video_holder.setFrameShape(QtWidgets.QFrame.NoFrame)
-        video_holder.setMinimumHeight(300); video_holder.setMaximumHeight(300)
-        vh = QtWidgets.QVBoxLayout(video_holder); vh.setContentsMargins(0,0,0,0); vh.addWidget(self.view_video)
-        imgs.addWidget(video_holder)
+        previews = QtWidgets.QHBoxLayout()
+        previews.addWidget(self.preview_stack, stretch=1)
+        previews.addWidget(self.view_steg, stretch=1)
+        previews.addWidget(self.view_diff, stretch=1)
 
-        embed_grid.addLayout(imgs, 4, 0, 1, 3)
+        embed_grid.addLayout(previews, 5, 0, 1, 3)
+
 
         self.analysis_tab = AnalysisWidget()
         self.tabs.addTab(self.analysis_tab, "Steg Analysis")
@@ -703,7 +776,22 @@ class MainWindow(QtWidgets.QWidget):
         if which == "carrier":
             self.carrier = None
             self.box_carrier.label.setText("Drop a file here")
-            self.view_orig.clear()
+            if isinstance(self.codec, ImageCodec):
+                self.view_orig.clear()
+
+            elif isinstance(self.codec, Mp4Codec):
+                self.view_video.stop()              # stop playback
+                self.view_video.cv_label.clear()    # clear OpenCV frame
+                self.view_video.video_widget.hide() # hide QVideoWidget
+                self.view_video.cv_label.hide()
+                self.preview_stack.setCurrentIndex(0)  # reset back to blank image view
+
+            elif isinstance(self.codec, WavCodec):
+                self.audio_player.stop()
+                self.audio_player.time_lbl.setText("00:00 / 00:00")
+                self.audio_player.hide()              # hide player
+                self.preview_stack.setCurrentIndex(0) # go back to image slot (blank)
+
         elif which == "payload":
             self.payload = None
             self.payload_widget.drop.label.setText("Drop a file here")
@@ -807,18 +895,21 @@ class MainWindow(QtWidgets.QWidget):
 
         /* Drop zone card */
         QGroupBox#dropZone {
-            background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #FFFFFF, stop:1 #FAFBFF);
+            background: #FFFFFF;                /* clean white */
             border: 2px dashed #C9D4EE;
             border-radius: 14px;
         }
+
         QGroupBox#dropZone[dragOver="true"] {
             border-color: #1976D2;
-            background: #EFF6FF;
+            background: #F0F7FF;                /* light blue on drag */
         }
+
         QGroupBox#dropZone > QLabel {
             color: #435062;
             font-weight: 500;
             font-size: 14px;
+            background: transparent;            /* remove grey */
         }
 
         /* Inputs */
@@ -842,6 +933,7 @@ class MainWindow(QtWidgets.QWidget):
         }
 
         /* Buttons */
+        /* Default buttons */
         QPushButton {
             background-color: #1976D2;
             color: #FFFFFF;
@@ -854,6 +946,30 @@ class MainWindow(QtWidgets.QWidget):
         QPushButton:hover { background-color: #1565C0; }
         QPushButton:pressed { background-color: #0D47A1; }
         QPushButton:disabled { background-color: #E6EAF3; color: #8A94A6; }
+
+        /* Secondary (outlined) */
+        QPushButton[secondary="true"] {
+            background-color: transparent;
+            border: 2px solid #1976D2;
+            color: #1976D2;
+        }
+        QPushButton[secondary="true"]:hover {
+            background-color: #E3F2FD;
+        }
+        QPushButton[secondary="true"]:pressed {
+            background-color: #BBDEFB;
+        }
+
+        /* Tertiary (muted grey) */
+        QPushButton[tertiary="true"] {
+            background-color: #F5F7FA;
+            color: #555C68;
+            border: 1px solid #D9DEEA;
+        }
+        QPushButton[tertiary="true"]:hover {
+            background-color: #ECEFF4;
+        }
+
 
         /* Tabs */
         QTabWidget::pane {
@@ -922,6 +1038,26 @@ class MainWindow(QtWidgets.QWidget):
             border-radius: 12px;
             padding: 10px;
         }
+        /* Browse button */
+        /* Inline Browse button (link-like style) */
+        QPushButton#browseBtnInline {
+            background: transparent;
+            color: #1565C0;
+            border: none;
+            font-weight: 500;
+            font-size: 14px;
+            padding: 0 2px;
+            text-decoration: underline;   /* makes it look part of sentence */
+        }
+        QPushButton#browseBtnInline:hover {
+            color: #0D47A1;
+        }
+        QPushButton#browseBtnInline:pressed {
+            color: #08306B;
+        }
+
+
+
 
         """
         
@@ -1033,72 +1169,102 @@ class MainWindow(QtWidgets.QWidget):
             return
 
         stem = Path(self.carrier).stem
+        self.status.setText("Embedding, please wait...")
 
-        try:
+        def task():
             if isinstance(self.codec, WavCodec):
-                # WAV: respect start sample offset
                 start_sample = self.start_sample_spin.value() if self.audio_region_enable_chk.isChecked() else 0
                 out_base = Path(self.carrier).with_name(f"{stem}__steg")
-                result = self.codec.embed(self.carrier, payload, out_base, bpc, key, start_sample=start_sample)
+                return self.codec.embed(self.carrier, payload, out_base, bpc, key, start_sample=start_sample)
             else:
-                # Generic path via stego_manager
-                result = stego_embed(self.carrier, payload, f"{stem}__steg", bpc, key)
+                return stego_embed(self.carrier, payload, f"{stem}__steg", bpc, key)
 
-            out_file = Path(result["out"])
-            self.last_output_path = out_file
-            self.save_output_btn.setEnabled(True)
+        worker = Worker(task)
 
-            # If images, show previews
-            if "steg" in result and "orig" in result:
-                self.view_steg.set_image_from_array(result["steg"])
-                self.view_orig.set_image_from_array(result["orig"])
-                if "mask" in result:
-                    mask_rgb = np.stack([result["mask"]] * 3, axis=2)
-                    self.view_diff.set_image_from_array(mask_rgb)
-            else:
-                self.view_diff.setText(f"{result['metric_label']}: {result['metric_value']}")
+        def done(result):
+            try:
+                out_file = Path(result["out"])
+                self.last_output_path = out_file
+                self.save_output_btn.setEnabled(True)
 
-            # For WAV, auto-load output into audio preview
-            if isinstance(self.codec, WavCodec):
-                try:
-                    self.preview_stack.setCurrentIndex(2)
-                    self.audio_player.load(out_file)
-                except Exception:
-                    pass
+                # If images, show previews
+                if "steg" in result and "orig" in result:
+                    self.view_steg.set_image_from_array(result["steg"])
+                    self.view_orig.set_image_from_array(result["orig"])
+                    if "mask" in result:
+                        mask_rgb = np.stack([result["mask"]] * 3, axis=2)
+                        self.view_diff.set_image_from_array(mask_rgb)
+                else:
+                    self.view_diff.setText(f"{result['metric_label']}: {result['metric_value']}")
 
-            # consistent status
-            bytes_emb = int(result.get("bytes_embedded", 0))
-            self.status.setText(f"✅ Embedded {bytes_emb} bytes → {out_file}")
+                # For WAV, auto-load output into audio preview
+                if isinstance(self.codec, WavCodec):
+                    try:
+                        self.preview_stack.setCurrentIndex(2)
+                        self.audio_player.load(out_file)
+                    except Exception:
+                        pass
 
-        except Exception as e:
-            self.status.setText(f"❌ Embed failed: {e}")
+                bytes_emb = int(result.get("bytes_embedded", 0))
+                self.status.setText(f"✅ Embedded {bytes_emb} bytes → {out_file}")
+            except Exception as e:
+                traceback.print_exc()
+                self.status.setText(f"❌ Embed post-process failed: {e}")
+
+        def fail(err):
+            exctype, value, tb = err
+            self.status.setText(f"❌ Embed failed: {value}")
+            print(tb)
+
+        worker.signals.finished.connect(done)
+        worker.signals.error.connect(fail)
+        self.threadpool.start(worker)
 
     def on_extract(self):
         if not self.stego:
-            self.status.setText("Drop a stego file first."); return
+            self.status.setText("Drop a stego file first."); 
+            return
         if not self.codec.accepts(self.stego):
-            self.status.setText(f"{self.codec.pretty} expects a different stego file type."); return
+            self.status.setText(f"{self.codec.pretty} expects a different stego file type."); 
+            return
 
         bpc = int(self.bpc_spin.value()); key = self.key_edit.text()
-        try:
+        key = self.key_edit.text()
+        self.status.setText("Extracting, please wait...")
+
+        def task():
             if isinstance(self.codec, WavCodec):
                 start_sample = self.start_sample_spin.value() if self.audio_region_enable_chk.isChecked() else 0
-                data = self.codec.extract(self.stego, bpc, key, start_sample=start_sample)
+                return self.codec.extract(self.stego, bpc, key, start_sample=start_sample)
             else:
-                data = stego_extract(self.stego, bpc, key)
+                return stego_extract(self.stego, bpc, key)
 
-            out = Path(self.stego).with_name(Path(self.stego).stem + "__recovered.bin")
-            out.write_bytes(data)
-            self.status.setText(f"✅ Extracted payload → {out}")
-            # For WAV stego, preview the selected stego audio file
-            if isinstance(self.codec, WavCodec):
-                try:
-                    self.preview_stack.setCurrentIndex(2)
-                    self.audio_player.load(self.stego)
-                except Exception:
-                    pass
-        except Exception as e:
-            self.status.setText(f"❌ Extract failed: {e}")
+        worker = Worker(task)
+
+        def done(data):
+            try:
+                out = Path(self.stego).with_name(Path(self.stego).stem + "__recovered.bin")
+                out.write_bytes(data)
+                self.status.setText(f"Extracted payload → {out}")
+
+                if isinstance(self.codec, WavCodec):
+                    try:
+                        self.preview_stack.setCurrentIndex(2)
+                        self.audio_player.load(self.stego)
+                    except Exception:
+                        pass
+            except Exception as e:
+                traceback.print_exc()
+                self.status.setText(f"Extract post-process failed: {e}")
+
+        def fail(err):
+            exctype, value, tb = err
+            self.status.setText(f"Extract failed: {value}")
+            print(tb)
+
+        worker.signals.finished.connect(done)
+        worker.signals.error.connect(fail)
+        self.threadpool.start(worker)
 
     def _attempt_other_bpcs(self, key: str):
         if not self.stego or not isinstance(self.codec, WavCodec):
