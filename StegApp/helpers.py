@@ -7,6 +7,7 @@ MAGIC = b"STEG"
 VERSION = 1
 FLAG_NONE = 0
 HEADER_LEN = 15  # MAGIC(4) | VER(1) | FLAGS(1) | MIME(1) | LEN(4) | CRC32(4)
+FLAG_PLAINTEXT_CRC = 1
 
 # ----- tiny utils -----
 def u32(n: int) -> bytes:
@@ -57,8 +58,18 @@ def bytes_from_bits(bit_iter, n_bytes: int) -> bytes:
             cnt = 0
     return bytes(out)
 
+def _normalize_key(key: str) -> str:
+    if not key:
+        return ""
+    # Replace common non-breaking spaces, trim ends, and collapse internal whitespace
+    k = key.replace("\u00A0", " ").replace("\u202F", " ")
+    k = k.strip()
+    k = " ".join(k.split())
+    return k
+
 # Very lightweight XOR stream (for obfuscation, not crypto)
 def derive_keystream(key: str, n: int) -> bytes:
+    key = _normalize_key(key)
     if not key:
         return b"\x00" * n
     out = bytearray()

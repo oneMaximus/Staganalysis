@@ -9,7 +9,7 @@ from PIL import Image
 from base_codec import BaseCodec
 from helpers import (
     build_header, parse_header, bits_from_bytes, bytes_from_bits,
-    xor_bytes, crc32, HEADER_LEN
+    xor_bytes, crc32, HEADER_LEN, FLAG_PLAINTEXT_CRC  
 )
 
 # ===== Custom-LSB directives (parsed from the Key field) =====
@@ -138,8 +138,9 @@ class ImageCodec(BaseCodec):
 
         chs, planes, effective_bpc, user_key, do_shuffle, rng = self._effective_params(arr, bpc, key)
 
+        # Obfuscate the payload, but compute header over PLAINTEXT so the key is enforced at extract
         obf = xor_bytes(payload, user_key)
-        header = build_header(obf, 0)
+        header = build_header(payload, 0, flags=FLAG_PLAINTEXT_CRC)
         total = header + obf
 
         cap_bytes = (H * W * len(chs) * effective_bpc) // 8
@@ -215,8 +216,23 @@ class ImageCodec(BaseCodec):
         r = reader()
         header = bytes_from_bits(r, HEADER_LEN)
         ver, flags, length, check = parse_header(header)
-        data = bytes_from_bits(r, length)
-        data = xor_bytes(data, user_key)
-        if crc32(data) != check:
-            raise ValueError("Checksum mismatch (wrong key/options or corrupted carrier)")
-        return data
+
+        # Read stored (obfuscated) bytes and de-obfuscate with current key
+        enc = bytes_from_bits(r, length)
+        dec = xor_bytes(enc, user_key)
+
+        # New files: header says CRC covers plaintext -> enforce key
+        if (flags & FLAG_PLAINTEXT_CRC) != 0:
+            if crc32(dec) != check:
+                raise ValueError("Checksum mismatch (wrong key/options or corrupted carrier)")
+            return dec
+
+        # Legacy fallback: header CRC was over obfuscated bytes (cannot enforce key)
+        if crc32(enc) == check:
+            return dec  # may be garbage if key is wrong, but preserves backward compatibility
+
+        # Last resort: if someone wrote CRC over plaintext without flag (unlikely), accept that too
+        if crc32(dec) == check:
+            return dec
+
+        raise ValueError("Checksum mismatch (wrong key/options or corrupted carrier)")
