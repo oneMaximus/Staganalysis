@@ -10,6 +10,9 @@ from PyQt5 import QtCore, QtWidgets
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+#For browse option
+from dropbox_widget import DropBox
+
 
 # ===================== WAV LOADING (Analysis Only) =====================
 
@@ -110,8 +113,10 @@ class WavAnalysisWidget(QtWidgets.QWidget):
         self.setAcceptDrops(False)  # We use dedicated drop labels instead
 
         # ---- Drop Areas ----
-        self.drop_primary = DropLabel("Drop PRIMARY (cover) WAV here")
-        self.drop_compare = DropLabel("Drop COMPARE (stego/suspect) WAV here")
+        #self.drop_primary = DropLabel("Drop PRIMARY (cover) WAV here")
+        #self.drop_compare = DropLabel("Drop COMPARE (stego/suspect) WAV here")
+        self.drop_primary = DropBox("Drop PRIMARY (cover) WAV here")
+        self.drop_compare = DropBox("Drop COMPARE (stego/suspect) WAV here")
 
         self.drop_primary.fileDropped.connect(self._on_primary_dropped)
         self.drop_compare.fileDropped.connect(self._on_compare_dropped)
