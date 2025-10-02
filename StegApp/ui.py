@@ -6,7 +6,7 @@ from pathlib import Path
 from image_codec import ImageCodec
 from wav_codec import WavCodec
 from PIL import Image
-from typing import Optional
+from typing import Optional, Tuple
 # UPDATED import to include region helpers
 from mp4_codec import Mp4Codec, preview_region, interactive_select_region
 from analysis_widget import AnalysisWidget
@@ -15,7 +15,7 @@ from wav_analysis_widget import WavAnalysisWidget   # NEW: WAV analysis tab
 import traceback
 import numpy as np
 import cv2
-#browse
+# browse
 from wav_analysis_widget import WavAnalysisWidget
 from dropbox_widget import DropBox
 
@@ -40,13 +40,12 @@ EXT_TO_CODEC = {
 }
 
 
-# ADD: a proxy style that paints visible arrows regardless of stylesheet/images
+# -------- helper style for visible arrows ----------
 class ArrowStyle(QtWidgets.QProxyStyle):
     def __init__(self, base="Fusion"):
         super().__init__(base)
 
     def _paint_triangle(self, painter: QtGui.QPainter, rect: QtCore.QRect, up: bool):
-        # Center a small triangle inside rect
         size = min(rect.width(), rect.height(), 12)
         cx = rect.center().x()
         cy = rect.center().y()
@@ -63,36 +62,21 @@ class ArrowStyle(QtWidgets.QProxyStyle):
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QBrush(QtGui.QColor("#1F2430")))  # visible on your light theme
+        painter.setBrush(QtGui.QBrush(QtGui.QColor("#1F2430")))
         painter.drawPolygon(QtGui.QPolygonF([p1, p2, p3]))
         painter.restore()
 
     def drawPrimitive(self, element, option, painter, widget=None):
-        # Handle combo and spin indicators explicitly
-        if element in (
-            QtWidgets.QStyle.PE_IndicatorArrowDown,
-            QtWidgets.QStyle.PE_IndicatorSpinDown
-        ):
+        if element in (QtWidgets.QStyle.PE_IndicatorArrowDown, QtWidgets.QStyle.PE_IndicatorSpinDown):
             self._paint_triangle(painter, option.rect, up=False)
             return
-        if element in (
-            QtWidgets.QStyle.PE_IndicatorArrowUp,
-            QtWidgets.QStyle.PE_IndicatorSpinUp
-        ):
+        if element in (QtWidgets.QStyle.PE_IndicatorArrowUp, QtWidgets.QStyle.PE_IndicatorSpinUp):
             self._paint_triangle(painter, option.rect, up=True)
             return
-        # Fallback to default for everything else
         return super().drawPrimitive(element, option, painter, widget)
 
-    def standardPixmap(self, sp, opt=None, widget=None) -> QtGui.QPixmap:
-        if sp == QtWidgets.QStyle.SP_ArrowUp:
-            return self._up
-        if sp == QtWidgets.QStyle.SP_ArrowDown:
-            return self._down
-        if sp == QtWidgets.QStyle.SP_ComboBoxArrow:
-            return self._down
-        return super().standardPixmap(sp, opt, widget)
-    
+
+# -------- worker threads ----------
 class WorkerSignals(QObject):
     finished = pyqtSignal(object)   # result
     error = pyqtSignal(tuple)       # (exctype, value, traceback)
@@ -104,7 +88,6 @@ class Worker(QRunnable):
         self.args = args
         self.kwargs = kwargs
         self.signals = WorkerSignals()
-
     def run(self):
         try:
             result = self.fn(*self.args, **self.kwargs)
@@ -113,6 +96,8 @@ class Worker(QRunnable):
             traceback.print_exc()
             self.signals.error.emit((type(e), e, traceback.format_exc()))
 
+
+# -------- payload box ----------
 class PayloadWidget(QtWidgets.QGroupBox):
     changed = QtCore.pyqtSignal()
     def __init__(self, title="Payload"):
@@ -120,9 +105,9 @@ class PayloadWidget(QtWidgets.QGroupBox):
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setObjectName("payloadTabs")
         tb = self.tabs.tabBar()
-        tb.setUsesScrollButtons(False)     
-        tb.setExpanding(False)              
-        tb.setElideMode(QtCore.Qt.ElideNone) 
+        tb.setUsesScrollButtons(False)
+        tb.setExpanding(False)
+        tb.setElideMode(QtCore.Qt.ElideNone)
         self.tabs.setMovable(False)
         self.tabs.setTabBarAutoHide(False)
         self.file_tab = QtWidgets.QWidget()
@@ -170,28 +155,26 @@ class PayloadWidget(QtWidgets.QGroupBox):
         return f"text:{len(txt)} chars"
 
     def payload_bytes(self) -> bytes:
-        if self.tabs.currentIndex() == 0:  # File tab
+        if self.tabs.currentIndex() == 0:
             if not self._file_path:
                 return b""
             try:
                 return Path(self._file_path).read_bytes()
             except Exception as e:
-                QtWidgets.QMessageBox.critical(
-                    self, "Error", f"Failed to read payload file:\n{e}"
-                )
+                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to read payload file:\n{e}")
                 return b""
-        else:  # Text tab
-            enc = self.encoding.currentText()
-            return self.text_edit.toPlainText().encode(enc, errors="replace")
-
-
+        enc = self.encoding.currentText()
+        return self.text_edit.toPlainText().encode(enc, errors="replace")
 
     def _on_file(self, p: Path):
         self._file_path = p
         self.changed.emit()
 
 
-class ImageView(QtWidgets.QLabel):
+# -------- selectable image view (mouse region) ----------
+class SelectableImageView(QtWidgets.QLabel):
+    regionChanged = QtCore.pyqtSignal(object)  # (x,y,w,h) or None
+
     def __init__(self, title: str):
         super().__init__()
         self.setAlignment(QtCore.Qt.AlignCenter)
@@ -201,7 +184,44 @@ class ImageView(QtWidgets.QLabel):
         self.setToolTip(title)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.setMaximumHeight(300)
+
+        self._img_arr: Optional[np.ndarray] = None
+        self._pixmap_rect = QtCore.QRect()
+        self._select_enabled = False
+        self._rubber = QtWidgets.QRubberBand(QtWidgets.QRubberBand.Rectangle, self)
+        self._drag_origin = None
+        self._current_sel = None  # QRect in widget coords
+
+    def enable_selection(self, on: bool):
+        self._select_enabled = on
+        if not on:
+            self.clear_selection()
+
+    def clear_selection(self):
+        self._rubber.hide()
+        self._drag_origin = None
+        self._current_sel = None
+        self.regionChanged.emit(None)
+
+    def selected_region_imgspace(self) -> Optional[Tuple[int,int,int,int]]:
+        if self._img_arr is None or self._current_sel is None or self._pixmap_rect.isNull():
+            return None
+        r = self._current_sel.intersected(self._pixmap_rect)
+        if r.isNull():
+            return None
+        img_h, img_w = self._img_arr.shape[:2]
+        sx = img_w / self._pixmap_rect.width()
+        sy = img_h / self._pixmap_rect.height()
+        x = max(0, min(img_w, int((r.x() - self._pixmap_rect.x()) * sx)))
+        y = max(0, min(img_h, int((r.y() - self._pixmap_rect.y()) * sy)))
+        w = max(0, min(img_w - x, int(r.width() * sx)))
+        h = max(0, min(img_h - y, int(r.height() * sy)))
+        if w <= 0 or h <= 0:
+            return None
+        return (x, y, w, h)
+
     def set_image_from_array(self, arr: np.ndarray):
+        self._img_arr = arr
         if arr.ndim == 2:
             h,w = arr.shape
             qimg = QtGui.QImage(arr.data, w, h, w, QtGui.QImage.Format_Grayscale8)
@@ -211,17 +231,46 @@ class ImageView(QtWidgets.QLabel):
                 qimg = QtGui.QImage(arr.data, w, h, 3*w, QtGui.QImage.Format_RGB888)
             else:
                 qimg = QtGui.QImage(arr.data, w, h, 4*w, QtGui.QImage.Format_RGBA8888)
-        pix = QtGui.QPixmap.fromImage(qimg).scaled(
-            self.width(), self.height(),
-            QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
-        )
+        scaled = qimg.scaled(self.width(), self.height(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        pix = QtGui.QPixmap.fromImage(scaled)
         self.setPixmap(pix)
+        x = (self.width()  - scaled.width())  // 2
+        y = (self.height() - scaled.height()) // 2
+        self._pixmap_rect = QtCore.QRect(x, y, scaled.width(), scaled.height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._img_arr is not None:
+            self.set_image_from_array(self._img_arr)
+        if self._current_sel:
+            self._rubber.setGeometry(self._current_sel)
+
+    def mousePressEvent(self, e: QtGui.QMouseEvent):
+        if not self._select_enabled or self._img_arr is None:
+            return
+        if e.button() == QtCore.Qt.LeftButton and self._pixmap_rect.contains(e.pos()):
+            self._drag_origin = e.pos()
+            self._current_sel = QtCore.QRect(self._drag_origin, QtCore.QSize())
+            self._rubber.setGeometry(self._current_sel)
+            self._rubber.show()
+
+    def mouseMoveEvent(self, e: QtGui.QMouseEvent):
+        if self._drag_origin is not None:
+            self._current_sel = QtCore.QRect(self._drag_origin, e.pos()).normalized()
+            self._rubber.setGeometry(self._current_sel)
+
+    def mouseReleaseEvent(self, e: QtGui.QMouseEvent):
+        if self._drag_origin is not None and e.button() == QtCore.Qt.LeftButton:
+            self._current_sel = QtCore.QRect(self._drag_origin, e.pos()).normalized()
+            self._rubber.setGeometry(self._current_sel)
+            self._drag_origin = None
+            self.regionChanged.emit(self.selected_region_imgspace())
 
 
+# -------- fixed video/audio previews ----------
 class FixedVideoWidget(QVideoWidget):
     def sizeHint(self):
         return QtCore.QSize(480,270)
-
 
 class VideoPlayer(QtWidgets.QWidget):
     def __init__(self, title: str):
@@ -246,7 +295,6 @@ class VideoPlayer(QtWidgets.QWidget):
         self.cv_label.hide()
         self.cv_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         lay.addWidget(self.cv_label)
-        # ADD: simple control bar and seek
         ctrl = QtWidgets.QHBoxLayout()
         self.btn_play = QtWidgets.QPushButton("Play")
         self.btn_pause = QtWidgets.QPushButton("Pause")
@@ -257,24 +305,20 @@ class VideoPlayer(QtWidgets.QWidget):
         ctrl.addSpacing(8); ctrl.addWidget(self.pos_slider, 1); ctrl.addWidget(self.time_lbl)
         lay.addLayout(ctrl)
 
-        # wire up
         self.btn_play.clicked.connect(self._play)
         self.btn_pause.clicked.connect(self._pause)
         self.btn_stop.clicked.connect(self._stop)
         self.pos_slider.sliderMoved.connect(self._set_position)
-
-        # track position/duration for QMediaPlayer
         self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(self._on_duration)
 
-        # state for CV fallback
         self._ms = 0
         self._dur_ms = 0
         self._cap = None
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._next_frame)
         self._path = None
-        self._fps_interval = 33  # ADD: default; will be set from FPS in fallback
+        self._fps_interval = 33
         if hasattr(self.player,"errorOccurred"):
             self.player.errorOccurred.connect(self._on_qt_error)
         else:
@@ -282,7 +326,6 @@ class VideoPlayer(QtWidgets.QWidget):
         self.player.mediaStatusChanged.connect(self._on_media_status)
 
     def load(self, path: Path):
-        # Always use OpenCV fallback to avoid DirectShow errors on Windows
         self.stop()
         self._path = Path(path)
         self.video_widget.hide()
@@ -303,7 +346,7 @@ class VideoPlayer(QtWidgets.QWidget):
         if not self._cap.isOpened():
             self.cv_label.setText("Could not open video (fallback)."); self.cv_label.show(); return
         fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
-        self._fps_interval = int(max(15, 1000.0 / fps))  # store interval for play/pause/seek logic
+        self._fps_interval = int(max(15, 1000.0 / fps))
         self._timer.start(self._fps_interval)
         self.cv_label.show()
         count = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -316,7 +359,6 @@ class VideoPlayer(QtWidgets.QWidget):
         if not self._cap: return
         ok, frame = self._cap.read()
         if not ok:
-            # Rewind to start and pause (so Play works again)
             if self._cap is not None:
                 try: self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 except: pass
@@ -341,11 +383,8 @@ class VideoPlayer(QtWidgets.QWidget):
 
     def _play(self):
         if self.cv_label.isVisible():
-            # Fallback mode
             if self._cap is None and self._path:
-                # Re-open video if it was released
-                self._start_cv_fallback(self._path)
-                return
+                self._start_cv_fallback(self._path); return
             if not self._timer.isActive():
                 self._timer.start(self._fps_interval)
         else:
@@ -401,7 +440,7 @@ class VideoPlayer(QtWidgets.QWidget):
         def fmt(ms):
             s = int(ms/1000); m,s = divmod(s,60); return f"{m:02d}:{s:02d}"
         self.time_lbl.setText(f"{fmt(pos_ms)} / {fmt(dur_ms)}")
-    
+
     def stop(self):
         try: self.player.stop()
         except: pass
@@ -421,12 +460,8 @@ class AudioPlayer(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(6,6,6,6)
         self.title_lbl = QtWidgets.QLabel(title)
         lay.addWidget(self.title_lbl)
-
-        # QMediaPlayer for audio
         self.player = QMediaPlayer()
         self.player.setVolume(80)
-
-        # Controls
         ctrl = QtWidgets.QHBoxLayout()
         self.btn_play = QtWidgets.QPushButton("Play")
         self.btn_pause = QtWidgets.QPushButton("Pause")
@@ -438,7 +473,6 @@ class AudioPlayer(QtWidgets.QWidget):
         self.vol_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.vol_slider.setRange(0, 100); self.vol_slider.setValue(80)
         self.vol_slider.setFixedWidth(120)
-
         ctrl.addWidget(self.btn_play)
         ctrl.addWidget(self.btn_pause)
         ctrl.addWidget(self.btn_stop)
@@ -449,8 +483,6 @@ class AudioPlayer(QtWidgets.QWidget):
         ctrl.addWidget(self.vol_lbl)
         ctrl.addWidget(self.vol_slider)
         lay.addLayout(ctrl)
-
-        # Connections
         self.btn_play.clicked.connect(self.player.play)
         self.btn_pause.clicked.connect(self.player.pause)
         self.btn_stop.clicked.connect(self.player.stop)
@@ -458,8 +490,6 @@ class AudioPlayer(QtWidgets.QWidget):
         self.pos_slider.sliderMoved.connect(self.player.setPosition)
         self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(self._on_duration)
-
-        # Styling/size
         self.setMinimumHeight(120)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
@@ -488,11 +518,12 @@ class AudioPlayer(QtWidgets.QWidget):
         self.stop(); super().closeEvent(e)
 
 
+# ----------- Main Window -----------
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.threadpool = QThreadPool()
-        self.setWindowTitle("Steg ACW1 — Image, WAV, MP4 LSB")
+        self.setWindowTitle("Steg Lab — Image, WAV, MP4 LSB")
         self.codec_name = "Image (PNG/BMP/TIFF)"
         self.codec = CODECS[self.codec_name]
         self.carrier: Optional[Path] = None
@@ -513,11 +544,10 @@ class MainWindow(QtWidgets.QWidget):
         self.payload_widget = PayloadWidget("Payload")
         self.box_stego   = DropBox("Stego (for Extract)")
 
-        #Seb Clear Feature (QPushButton)
+        # Clear buttons
         self.clear_carrier_btn = QtWidgets.QPushButton("Clear Carrier")
         self.clear_payload_btn = QtWidgets.QPushButton("Clear Payload")
         self.clear_stego_btn   = QtWidgets.QPushButton("Clear Stego")
-        
 
         self.bpc_spin = QtWidgets.QSpinBox(); self.bpc_spin.setRange(1,8); self.bpc_spin.setValue(1)
         self.bpc_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.UpDownArrows)
@@ -526,38 +556,32 @@ class MainWindow(QtWidgets.QWidget):
         self.key_edit = QtWidgets.QLineEdit(); self.key_edit.setPlaceholderText("Key (optional)")
         self.embed_btn = QtWidgets.QPushButton("Embed ▶")
         self.extract_btn = QtWidgets.QPushButton("Extract ⏏")
-        self.status = QtWidgets.QLabel("Ready."); self.status.setWordWrap(True)
-        self.status.setObjectName("status")
-        
+        self.status = QtWidgets.QLabel("Ready."); self.status.setWordWrap(True); self.status.setObjectName("status")
 
-        self.view_orig = ImageView("Original")
-        self.view_steg = ImageView("Embedded")
-        self.view_diff = ImageView("Change map / metric")
+        # PREVIEWS (Original is selectable)
+        self.view_orig = SelectableImageView("Original (drag to select embedding region)")
+        self.view_steg = SelectableImageView("Embedded")
+        self.view_diff = SelectableImageView("Change map / metric")
+
+        # ---- Image Region UI ----
+        self.img_region_group = QtWidgets.QGroupBox("Image Region (click & drag on 'Original')")
+        ir = QtWidgets.QHBoxLayout(self.img_region_group)
+        self.img_region_enable = QtWidgets.QCheckBox("Enable image region")
+        self.img_region_clear  = QtWidgets.QPushButton("Clear")
+        ir.addWidget(self.img_region_enable); ir.addStretch(1); ir.addWidget(self.img_region_clear)
 
         self.last_output_path: Optional[Path] = None
-        self.save_output_btn = QtWidgets.QPushButton("Save Output As…")
-        self.save_output_btn.setEnabled(False)
+        self.save_output_btn = QtWidgets.QPushButton("Save Output As…"); self.save_output_btn.setEnabled(False)
 
         self.tabs = QtWidgets.QTabWidget(self)
-        self.embed_tab = QtWidgets.QScrollArea()
-        self.embed_tab.setWidgetResizable(True)
-        self._embed_page = QtWidgets.QWidget()
-        self.embed_tab.setWidget(self._embed_page)
+        self.embed_tab = QtWidgets.QScrollArea(); self.embed_tab.setWidgetResizable(True)
+        self._embed_page = QtWidgets.QWidget(); self.embed_tab.setWidget(self._embed_page)
         self.tabs.addTab(self.embed_tab, "Embed / Extract")
         embed_grid = QtWidgets.QGridLayout(self._embed_page)
         self.tabs.tabBar().setElideMode(QtCore.Qt.ElideNone)
         self.tabs.tabBar().setExpanding(False)
         self.tabs.tabBar().setUsesScrollButtons(True)
         embed_grid.setVerticalSpacing(12)
-        self.embed_btn.setProperty("secondary", False)
-        self.embed_btn.setProperty("tertiary", False)
-
-        self.extract_btn.setProperty("secondary", True)
-        self.extract_btn.setProperty("tertiary", False)
-
-        self.save_output_btn.setProperty("secondary", False)
-        self.save_output_btn.setProperty("tertiary", True)
-
 
         form = QtWidgets.QFormLayout()
         form.addRow("Carrier Type:", self.codec_combo)
@@ -565,15 +589,13 @@ class MainWindow(QtWidgets.QWidget):
         form.addRow("Key:", self.key_edit)
         embed_grid.addLayout(form, 0,0,1,3)
 
-        # ---------- NEW REGION UI (Audio Only) ----------
+        # Audio Region (WAV)
         self.audio_region_group = QtWidgets.QGroupBox("Audio Region (LSB area)")
         ag_lay = QtWidgets.QGridLayout(self.audio_region_group)
         ag_lay.setContentsMargins(12, 18, 12, 12)
-
         self.audio_region_enable_chk = QtWidgets.QCheckBox("Enable audio start (WAV only)")
         self.audio_region_enable_chk.setChecked(True)
         ag_lay.addWidget(self.audio_region_enable_chk, 0, 0, 1, 3)
-
         ag_lay.addWidget(QtWidgets.QLabel("Start Sample:"), 1, 0)
         self.start_sample_spin = QtWidgets.QSpinBox()
         self.start_sample_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.UpDownArrows)
@@ -581,14 +603,11 @@ class MainWindow(QtWidgets.QWidget):
         self.start_sample_spin.setValue(0)
         self.start_sample_spin.setToolTip("WAV only: frame index to start embedding/extracting (header+payload).")
         ag_lay.addWidget(self.start_sample_spin, 1, 1)
-
         self.audio_region_enable_chk.toggled.connect(self.start_sample_spin.setEnabled)
-
         self.audio_region_group.hide()
         embed_grid.addWidget(self.audio_region_group, 1, 0, 1, 3)
-        # ------------------------------------------------
 
-        # ---------- NEW REGION UI (Video Only) ----------
+        # Video Region (MP4)
         self.region_group = QtWidgets.QGroupBox("Video Region (LSB area)")
         rg_lay = QtWidgets.QGridLayout(self.region_group)
         rg_lay.setContentsMargins(12, 18, 12, 12)
@@ -603,39 +622,33 @@ class MainWindow(QtWidgets.QWidget):
         self.region_h.setButtonSymbols(QtWidgets.QAbstractSpinBox.UpDownArrows)
         for sb in (self.region_x, self.region_y, self.region_w, self.region_h):
             sb.setEnabled(False)
-
         rg_lay.addWidget(self.region_enable_chk, 0,0,1,3)
         rg_lay.addWidget(QtWidgets.QLabel("X:"),1,0); rg_lay.addWidget(self.region_x,1,1)
         rg_lay.addWidget(QtWidgets.QLabel("Y:"),1,2); rg_lay.addWidget(self.region_y,1,3)
         rg_lay.addWidget(QtWidgets.QLabel("W:"),2,0); rg_lay.addWidget(self.region_w,2,1)
         rg_lay.addWidget(QtWidgets.QLabel("H:"),2,2); rg_lay.addWidget(self.region_h,2,3)
-
         self.region_preview_btn = QtWidgets.QPushButton("Preview Region")
         self.region_pick_btn = QtWidgets.QPushButton("Pick (Interactive)")
         self.region_preview_btn.setEnabled(False)
         self.region_pick_btn.setEnabled(False)
         rg_lay.addWidget(self.region_preview_btn,3,0,1,2)
         rg_lay.addWidget(self.region_pick_btn,3,2,1,2)
-
         embed_grid.addWidget(self.region_group,1,0,1,3)
-        # ------------------------------------------------
+
+        # Image Region group (visible for images)
+        embed_grid.addWidget(self.img_region_group, 1, 0, 1, 3)
 
         # Side-by-side: Carrier | Payload | Stego
         embed_grid.addWidget(self.box_carrier, 2, 0)
         embed_grid.addWidget(self.payload_widget, 2, 1)
         embed_grid.addWidget(self.box_stego,     2, 2)
 
-        #Seb Clear Feature
+        # Clear buttons
         embed_grid.addWidget(self.clear_carrier_btn, 3, 0)
         embed_grid.addWidget(self.clear_payload_btn, 3, 1)
         embed_grid.addWidget(self.clear_stego_btn,   3, 2)
 
-                # Make the three columns share space evenly
-        embed_grid.setColumnStretch(0, 1)
-        embed_grid.setColumnStretch(1, 1)
-        embed_grid.setColumnStretch(2, 1)
-
-        # --- Actions row (Embed / Extract / Save) ---
+        # Actions row
         actions_row = QtWidgets.QHBoxLayout()
         actions_row.addStretch(1)
         actions_row.addWidget(self.embed_btn)
@@ -646,14 +659,13 @@ class MainWindow(QtWidgets.QWidget):
         actions_row.addStretch(1)
         embed_grid.addLayout(actions_row, 4, 0, 1, 3)
 
-        # --- Previews row (Original | Stego | Diff) ---
+        # Previews row
         self.preview_stack = QtWidgets.QStackedWidget()
-        self.preview_stack.addWidget(self.view_orig)     # index 0 = image
-        self.preview_stack.addWidget(self.view_video)    # index 1 = video
-        self.preview_stack.addWidget(self.audio_player)  # index 2 = audio
+        self.preview_stack.addWidget(self.view_orig)     # 0 image
+        self.preview_stack.addWidget(self.view_video)    # 1 video
+        self.preview_stack.addWidget(self.audio_player)  # 2 audio
         self.preview_stack.setCurrentIndex(0)
 
-        # Allow previews to expand more naturally
         self.view_orig.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.view_steg.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.view_diff.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
@@ -664,14 +676,10 @@ class MainWindow(QtWidgets.QWidget):
         previews.addWidget(self.preview_stack, stretch=1)
         previews.addWidget(self.view_steg, stretch=1)
         previews.addWidget(self.view_diff, stretch=1)
-
         embed_grid.addLayout(previews, 5, 0, 1, 3)
-
 
         self.analysis_tab = AnalysisWidget()
         self.tabs.addTab(self.analysis_tab, "Steg Analysis")
-
-        # NEW: Dedicated WAV analysis / forensic tab
         self.wav_analysis_tab = WavAnalysisWidget()
         self.tabs.addTab(self.wav_analysis_tab, "WAV Analysis")
 
@@ -690,54 +698,34 @@ class MainWindow(QtWidgets.QWidget):
         self.extract_btn.clicked.connect(self.on_extract)
         self.save_output_btn.clicked.connect(self.on_save_output_as)
 
-        # Region signals
+        # Image selection controls
+        self.img_region_enable.toggled.connect(self.view_orig.enable_selection)
+        self.img_region_clear.clicked.connect(self.view_orig.clear_selection)
+        self.view_orig.regionChanged.connect(self._on_image_region_changed)
+
+        # Video region controls
         self.region_enable_chk.toggled.connect(self._update_region_boxes_enabled)
         self.region_preview_btn.clicked.connect(self._preview_region)
         self.region_pick_btn.clicked.connect(self._apply_interactive_region)
 
         self.apply_theme("Light")
-
-        # Initial state
         self._update_region_boxes_enabled()
         self.on_codec_change(self.codec_combo.currentText())
 
-        #Seb Clear Button
+        # Clear buttons
         self.clear_carrier_btn.clicked.connect(lambda: self.clear_box("carrier"))
         self.clear_payload_btn.clicked.connect(lambda: self.clear_box("payload"))
         self.clear_stego_btn.clicked.connect(lambda: self.clear_box("stego"))
 
-    def clear_box(self, which: str):
-        if which == "carrier":
-            self.carrier = None
-            self.box_carrier.label.setText("Drop a file here")
-            if isinstance(self.codec, ImageCodec):
-                self.view_orig.clear()
+    # ----- image region status
+    def _on_image_region_changed(self, reg):
+        if reg is None:
+            self.status.setText("Image region cleared.")
+        else:
+            x,y,w,h = reg
+            self.status.setText(f"Image region: x={x}, y={y}, w={w}, h={h}")
 
-            elif isinstance(self.codec, Mp4Codec):
-                self.view_video.stop()              # stop playback
-                self.view_video.cv_label.clear()    # clear OpenCV frame
-                self.view_video.video_widget.hide() # hide QVideoWidget
-                self.view_video.cv_label.hide()
-                self.preview_stack.setCurrentIndex(0)  # reset back to blank image view
-
-            elif isinstance(self.codec, WavCodec):
-                self.audio_player.stop()
-                self.audio_player.time_lbl.setText("00:00 / 00:00")
-                self.audio_player.hide()              # hide player
-                self.preview_stack.setCurrentIndex(0) # go back to image slot (blank)
-
-        elif which == "payload":
-            self.payload = None
-            self.payload_widget.drop.label.setText("Drop a file here")
-            self.payload_widget.text_edit.clear()
-        elif which == "stego":
-            self.stego = None
-            self.box_stego.label.setText("Drop a file here")
-            self.view_steg.clear()
-            self.view_diff.clear()
-        self.status.setText(f"Cleared {which}.")
-
-    # ---------------- Region Helpers ----------------
+    # ---------------- Region Helpers (video)
     def _update_region_boxes_enabled(self):
         enable = self.region_enable_chk.isChecked() and isinstance(self.codec, Mp4Codec)
         for sb in (self.region_x, self.region_y, self.region_w, self.region_h):
@@ -771,7 +759,6 @@ class MainWindow(QtWidgets.QWidget):
             self.region_w.setValue(w)
             self.region_h.setValue(h)
             self.status.setText(f"Region set to (x={x}, y={y}, w={w}, h={h})")
-            # Ensure region mode is on and show preview immediately
             self.region_enable_chk.setChecked(True)
             self._preview_region()
         except Exception as e:
@@ -794,209 +781,45 @@ class MainWindow(QtWidgets.QWidget):
             self.status.setText(f"Region preview saved: {tmp.name}")
         except Exception as e:
             self.status.setText(f"Preview failed: {e}")
-    # ------------------------------------------------
 
+    # ---------------- Theme
     def apply_theme(self, _: str = "Light"):
         app = QtWidgets.QApplication.instance()
         if not app:
             return
-
         try:
             QtWidgets.QApplication.setStyle(ArrowStyle("Fusion"))
         except Exception:
             pass
-
         ss = """
-        /* Base */
         QWidget { background-color: #F6F7FB; color: #1F2430; font-size: 14px; }
-
-        /* Cards & Groups */
-        QGroupBox {
-            background: #FFFFFF;
-            border: 1px solid #D9DEEA;
-            border-radius: 12px;
-            margin-top: 24px;            /* extra room for bigger title font */
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 12px;
-            padding: 4px 10px;
-            color: #1565C0;
-            background: transparent;
-            font-weight: 600;
-            font-size: 15px;
-        }
-
-        /* Drop zone card */
-        QGroupBox#dropZone {
-            background: #FFFFFF;                /* clean white */
-            border: 2px dashed #C9D4EE;
-            border-radius: 14px;
-        }
-
-        QGroupBox#dropZone[dragOver="true"] {
-            border-color: #1976D2;
-            background: #F0F7FF;                /* light blue on drag */
-        }
-
-        QGroupBox#dropZone > QLabel {
-            color: #435062;
-            font-weight: 500;
-            font-size: 14px;
-            background: transparent;            /* remove grey */
-        }
-
-        /* Inputs */
-        QLineEdit, QSpinBox, QPlainTextEdit, QTextEdit {
-            background: #FFFFFF;
-            color: #1F2430;
-            border: 1px solid #C9D4EE;
-            border-radius: 10px;
-            padding: 8px 10px;
-            selection-background-color: #CDE1F7;
-        }
-        /* Ensure spinboxes have room for the buttons without poking through */
+        QGroupBox { background: #FFFFFF; border: 1px solid #D9DEEA; border-radius: 12px; margin-top: 24px; }
+        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 4px 10px; color: #1565C0; font-weight: 600; font-size: 15px; }
+        QLineEdit, QSpinBox, QPlainTextEdit, QTextEdit { background: #FFFFFF; color: #1F2430; border: 1px solid #C9D4EE; border-radius: 10px; padding: 8px 10px; }
         QAbstractSpinBox { padding-right: 34px; }
-
-        QComboBox {
-            background: #FFFFFF;
-            color: #1F2430;
-            border: 1px solid #C9D4EE;
-            border-radius: 10px;
-            padding: 6px 10px 6px 10px;
-        }
-
-        /* Buttons */
-        /* Default buttons */
-        QPushButton {
-            background-color: #1976D2;
-            color: #FFFFFF;
-            border: none;
-            padding: 10px 14px;
-            border-radius: 10px;
-            font-weight: 600;
-            font-size: 14px;
-        }
+        QComboBox { background: #FFFFFF; color: #1F2430; border: 1px solid #C9D4EE; border-radius: 10px; padding: 6px 10px 6px 10px; }
+        QPushButton { background-color: #1976D2; color: #FFFFFF; border: none; padding: 10px 14px; border-radius: 10px; font-weight: 600; font-size: 14px; }
         QPushButton:hover { background-color: #1565C0; }
         QPushButton:pressed { background-color: #0D47A1; }
         QPushButton:disabled { background-color: #E6EAF3; color: #8A94A6; }
-
-        /* Secondary (outlined) */
-        QPushButton[secondary="true"] {
-            background-color: transparent;
-            border: 2px solid #1976D2;
-            color: #1976D2;
-        }
-        QPushButton[secondary="true"]:hover {
-            background-color: #E3F2FD;
-        }
-        QPushButton[secondary="true"]:pressed {
-            background-color: #BBDEFB;
-        }
-
-        /* Tertiary (muted grey) */
-        QPushButton[tertiary="true"] {
-            background-color: #F5F7FA;
-            color: #555C68;
-            border: 1px solid #D9DEEA;
-        }
-        QPushButton[tertiary="true"]:hover {
-            background-color: #ECEFF4;
-        }
-
-
-        /* Tabs */
-        QTabWidget::pane {
-            border: 1px solid #D9DEEA;
-            top: -1px;
-            background: #FFFFFF;
-            border-radius: 10px;
-        }
-        QTabBar::tab {
-            background: #FFFFFF;
-            color: #1F2430;
-            padding: 10px 16px;              /* a bit taller for readability */
-            min-width: 140px;                /* prevent truncation of "Embed / Extract" / "Steg Analysis" */
-            min-height: 34px;
-            border: 1px solid #D9DEEA;
-            border-bottom: none;
-            border-top-left-radius: 10px;
-            border-top-right-radius: 10px;
-            margin-right: 4px;
-            font-weight: 600;
-        }
+        QPushButton[secondary="true"] { background-color: transparent; border: 2px solid #1976D2; color: #1976D2; }
+        QPushButton[secondary="true"]:hover { background-color: #E3F2FD; }
+        QPushButton[secondary="true"]:pressed { background-color: #BBDEFB; }
+        QPushButton[tertiary="true"] { background-color: #F5F7FA; color: #555C68; border: 1px solid #D9DEEA; }
+        QPushButton[tertiary="true"]:hover { background-color: #ECEFF4; }
+        QTabWidget::pane { border: 1px solid #D9DEEA; top: -1px; background: #FFFFFF; border-radius: 10px; }
+        QTabBar::tab { background: #FFFFFF; color: #1F2430; padding: 10px 16px; min-width: 140px; min-height: 34px; border: 1px solid #D9DEEA; border-bottom: none; border-top-left-radius: 10px; border-top-right-radius: 10px; margin-right: 4px; font-weight: 600; }
         QTabBar::tab:selected { background: #EEF1F8; color: #0F172A; }
-
-        /* Sliders */
-        QSlider::groove:horizontal {
-            height: 8px;
-            background: #EEF1F8;
-            border: 1px solid #D9DEEA;
-            border-radius: 5px;
-        }
-        QSlider::handle:horizontal {
-            background: #1976D2;
-            width: 18px;
-            margin: -7px 0;
-            border-radius: 9px;
-        }
-
-        /* Scrollbars */
-        QScrollBar:vertical, QScrollBar:horizontal {
-            background: #F4F6FB;
-            border: 1px solid #D9DEEA;
-            border-radius: 8px;
-            width: 14px; height: 14px;
-        }
-        QScrollBar::handle {
-            background: #D9DEEA;
-            border-radius: 8px;
-        }
-
-        /* Status label */
+        QSlider::groove:horizontal { height: 8px; background: #EEF1F8; border: 1px solid #D9DEEA; border-radius: 5px; }
+        QSlider::handle:horizontal { background: #1976D2; width: 18px; margin: -7px 0; border-radius: 9px; }
+        QScrollBar:vertical, QScrollBar:horizontal { background: #F4F6FB; border: 1px solid #D9DEEA; border-radius: 8px; width: 14px; height: 14px; }
+        QScrollBar::handle { background: #D9DEEA; border-radius: 8px; }
         QLabel#status { color: #4B5B6B; font-size: 13px; }
-        
-        QLabel#dropBanner {
-            background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #FFFFFF, stop:1 #FAFBFF);
-            border: 2px dashed #C9D4EE;
-            border-radius: 12px;
-            padding: 10px;
-            font-weight: 600;
-            color: #435062;
-        }
-
-        /* Preview "cards" (image/video/audio) */
-        QLabel#previewCard, QWidget#previewCard {
-            background: #FFFFFF;
-            border: 1px solid #D9DEEA;
-            border-radius: 12px;
-            padding: 10px;
-        }
-        /* Browse button */
-        /* Inline Browse button (link-like style) */
-        QPushButton#browseBtnInline {
-            background: transparent;
-            color: #1565C0;
-            border: none;
-            font-weight: 500;
-            font-size: 14px;
-            padding: 0 2px;
-            text-decoration: underline;   /* makes it look part of sentence */
-        }
-        QPushButton#browseBtnInline:hover {
-            color: #0D47A1;
-        }
-        QPushButton#browseBtnInline:pressed {
-            color: #08306B;
-        }
-
-
-
-
+        QLabel#previewCard, QWidget#previewCard { background: #FFFFFF; border: 1px solid #D9DEEA; border-radius: 12px; padding: 10px; }
         """
-        
         app.setStyleSheet(ss)
 
+    # ---------------- codec changes / file drops
     def on_codec_change(self, txt: str):
         self.codec_name = txt
         self.codec = CODECS[txt]
@@ -1005,18 +828,21 @@ class MainWindow(QtWidgets.QWidget):
             self.preview_stack.setCurrentIndex(0)
             self.region_group.hide()
             self.audio_region_group.hide()
+            self.img_region_group.show()
             self.start_sample_spin.hide()
 
         elif isinstance(self.codec, WavCodec):
             self.preview_stack.setCurrentIndex(2)
             self.audio_region_group.show()
             self.region_group.hide()
+            self.img_region_group.hide()
             self.start_sample_spin.show()
 
         elif isinstance(self.codec, Mp4Codec):
             self.preview_stack.setCurrentIndex(1)
             self.region_group.show()
             self.audio_region_group.hide()
+            self.img_region_group.hide()
             self.start_sample_spin.hide()
 
         self.status.setObjectName("status")
@@ -1082,15 +908,19 @@ class MainWindow(QtWidgets.QWidget):
         else:
             self.view_steg.setText(p.name)
 
-    def on_payload(self, p: Path):
-        self.payload = p
-        self.status.setText(f"Payload set: {p.name}")
+    # ---------------- helpers
+    def _image_region_for_ops(self) -> Optional[Tuple[int,int,int,int]]:
+        if not isinstance(self.codec, ImageCodec):
+            return None
+        if not self.img_region_enable.isChecked():
+            return None
+        return self.view_orig.selected_region_imgspace()
 
+    # ---------------- embed/extract
     def on_embed(self):
         if not self.carrier or not self.payload_widget.has_payload():
             self.status.setText("Select a carrier and provide a payload (file or text).")
             return
-
         if not self.codec.accepts(self.carrier):
             self.status.setText(f"{self.codec.pretty} expects a different carrier type.")
             return
@@ -1105,13 +935,16 @@ class MainWindow(QtWidgets.QWidget):
         stem = Path(self.carrier).stem
         self.status.setText("Embedding, please wait...")
 
+        img_region = self._image_region_for_ops()
+
         def task():
             if isinstance(self.codec, WavCodec):
                 start_sample = self.start_sample_spin.value() if self.audio_region_enable_chk.isChecked() else 0
                 out_base = Path(self.carrier).with_name(f"{stem}__steg")
                 return self.codec.embed(self.carrier, payload, out_base, bpc, key, start_sample=start_sample)
             else:
-                return stego_embed(self.carrier, payload, f"{stem}__steg", bpc, key)
+                return stego_embed(self.carrier, payload, f"{stem}__steg", bpc, key,
+                                   image_region=img_region)
 
         worker = Worker(task)
 
@@ -1121,26 +954,21 @@ class MainWindow(QtWidgets.QWidget):
                 self.last_output_path = out_file
                 self.save_output_btn.setEnabled(True)
 
-                # If images, show previews
                 if "steg" in result and "orig" in result:
                     self.view_steg.set_image_from_array(result["steg"])
                     self.view_orig.set_image_from_array(result["orig"])
-                    if "mask" in result:
+                    if "mask" in result and img_region is not None:
                         mask_rgb = np.stack([result["mask"]] * 3, axis=2)
                         self.view_diff.set_image_from_array(mask_rgb)
                 else:
                     self.view_diff.setText(f"{result['metric_label']}: {result['metric_value']}")
 
-                # For WAV, auto-load output into audio preview
-                if isinstance(self.codec, WavCodec):
-                    try:
-                        self.preview_stack.setCurrentIndex(2)
-                        self.audio_player.load(out_file)
-                    except Exception:
-                        pass
-
                 bytes_emb = int(result.get("bytes_embedded", 0))
-                self.status.setText(f"✅ Embedded {bytes_emb} bytes → {out_file}")
+                if img_region:
+                    x,y,w,h = img_region
+                    self.status.setText(f"✅ Embedded {bytes_emb} bytes @ region (x={x},y={y},w={w},h={h}) → {out_file}")
+                else:
+                    self.status.setText(f"✅ Embedded {bytes_emb} bytes → {out_file}")
             except Exception as e:
                 traceback.print_exc()
                 self.status.setText(f"❌ Embed post-process failed: {e}")
@@ -1162,8 +990,10 @@ class MainWindow(QtWidgets.QWidget):
             self.status.setText(f"{self.codec.pretty} expects a different stego file type."); 
             return
 
-        bpc = int(self.bpc_spin.value()); key = self.key_edit.text()
+        bpc = int(self.bpc_spin.value())
         key = self.key_edit.text()
+        img_region = self._image_region_for_ops() if isinstance(self.codec, ImageCodec) else None
+
         self.status.setText("Extracting, please wait...")
 
         def task():
@@ -1171,7 +1001,7 @@ class MainWindow(QtWidgets.QWidget):
                 start_sample = self.start_sample_spin.value() if self.audio_region_enable_chk.isChecked() else 0
                 return self.codec.extract(self.stego, bpc, key, start_sample=start_sample)
             else:
-                return stego_extract(self.stego, bpc, key)
+                return stego_extract(self.stego, bpc, key, image_region=img_region)
 
         worker = Worker(task)
 
@@ -1179,14 +1009,11 @@ class MainWindow(QtWidgets.QWidget):
             try:
                 out = Path(self.stego).with_name(Path(self.stego).stem + "__recovered.bin")
                 out.write_bytes(data)
-                self.status.setText(f"Extracted payload → {out}")
-
-                if isinstance(self.codec, WavCodec):
-                    try:
-                        self.preview_stack.setCurrentIndex(2)
-                        self.audio_player.load(self.stego)
-                    except Exception:
-                        pass
+                if img_region:
+                    x,y,w,h = img_region
+                    self.status.setText(f"✅ Extracted payload from region (x={x},y={y},w={w},h={h}) → {out}")
+                else:
+                    self.status.setText(f"✅ Extracted payload → {out}")
             except Exception as e:
                 traceback.print_exc()
                 self.status.setText(f"Extract post-process failed: {e}")
@@ -1200,27 +1027,34 @@ class MainWindow(QtWidgets.QWidget):
         worker.signals.error.connect(fail)
         self.threadpool.start(worker)
 
-    def _attempt_other_bpcs(self, key: str):
-        if not self.stego or not isinstance(self.codec, WavCodec):
-            return
-        successes = []
-        for test_bpc in range(1,9):
-            try:
-                start_sample = int(self.start_sample_spin.value())
-                data = self.codec.extract(self.stego, test_bpc, key, start_sample=start_sample)
-                successes.append((test_bpc, data))
-            except Exception:
-                continue
-        if len(successes) == 1:
-            bpc_found, data = successes[0]
-            out = Path(self.stego).with_name(Path(self.stego).stem + f"__recovered_bpc{bpc_found}.bin")
-            out.write_bytes(data)
-            self.bpc_spin.setValue(bpc_found)
-            self.status.setText(f"✅ Auto-detected bpc={bpc_found}. Extracted → {out.name}")
-        elif len(successes) > 1:
-            self.status.setText(f"❌ Multiple possible bpc values ({[b for b,_ in successes]}). Please recall which was used.")
-        else:
-            self.status.setText("❌ Could not find valid header for any bpc 1..8.")
+    # -------------- misc
+    def clear_box(self, which: str):
+        if which == "carrier":
+            self.carrier = None
+            self.box_carrier.label.setText("Drop a file here")
+            if isinstance(self.codec, ImageCodec):
+                self.view_orig.clear()
+            elif isinstance(self.codec, Mp4Codec):
+                self.view_video.stop()
+                self.view_video.cv_label.clear()
+                self.view_video.video_widget.hide()
+                self.view_video.cv_label.hide()
+                self.preview_stack.setCurrentIndex(0)
+            elif isinstance(self.codec, WavCodec):
+                self.audio_player.stop()
+                self.audio_player.time_lbl.setText("00:00 / 00:00")
+                self.audio_player.hide()
+                self.preview_stack.setCurrentIndex(0)
+        elif which == "payload":
+            self.payload = None
+            self.payload_widget.drop.label.setText("Drop a file here")
+            self.payload_widget.text_edit.clear()
+        elif which == "stego":
+            self.stego = None
+            self.box_stego.label.setText("Drop a file here")
+            self.view_steg.clear()
+            self.view_diff.clear()
+        self.status.setText(f"Cleared {which}.")
 
     def check_capacity(self):
         if not self.carrier or not self.payload_widget.has_payload():
@@ -1250,6 +1084,10 @@ class MainWindow(QtWidgets.QWidget):
             filt = "WAV Audio (*.wav);;All Files (*)"
         elif suffix in (".mp4", ".avi"):
             filt = "Video (*.mp4 *.avi);;All Files (*)"
+        elif suffix in (".tif", ".tiff"):
+            filt = "TIFF Image (*.tif *.tiff);;All Files (*)"
+        elif suffix == ".bmp":
+            filt = "BMP Image (*.bmp);;All Files (*)"
         else:
             filt = "All Files (*)"
         dest, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Stego Output As…",

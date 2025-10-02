@@ -83,13 +83,13 @@ class AnalysisWidget(QtWidgets.QWidget):
         super().__init__()
 
         # --- small drop/filename strip ---
-        '''self.file_lbl = QtWidgets.QLabel("Drop an image or video (mp4/mov/m4v) here")
+        self.file_lbl = QtWidgets.QLabel("Drop an image or video (mp4/mov/m4v) here")
         self.file_lbl.setObjectName("dropBanner")
         self.file_lbl.setAlignment(QtCore.Qt.AlignCenter)
         self.file_lbl.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.file_lbl.setMinimumHeight(44)
-        self.file_lbl.setMaximumHeight(60)'''
-        self.file_box = DropBox("Drop an image or video (mp4/mov/m4v) here")
+        self.file_lbl.setMaximumHeight(60)
+        #self.file_box = DropBox("Drop an image or video (mp4/mov/m4v) here")
 
         # controls
         self.channel = QtWidgets.QComboBox()
@@ -123,8 +123,8 @@ class AnalysisWidget(QtWidgets.QWidget):
         # page layout
         lay = QtWidgets.QVBoxLayout(self)
         #For browse
-        #lay.addWidget(self.file_lbl)
-        lay.addWidget(self.file_box)
+        lay.addWidget(self.file_lbl)
+        #lay.addWidget(self.file_box)
         lay.addLayout(ctrl)
         lay.addWidget(splitter)
 
@@ -153,8 +153,9 @@ class AnalysisWidget(QtWidgets.QWidget):
 
     # ----- loading -----
     def load_path(self, p: Path):
-        #self.file_lbl.setText(p.name)
-        self.file_box.label.setText(p.name)
+        #Browse
+        self.file_lbl.setText(p.name)
+        #self.file_box.label.setText(p.name)
         self._stop_video()
         ext = p.suffix.lower()
         if ext in {".mp4", ".mov", ".m4v", ".avi", ".mkv"}:
